@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import type { BreadcrumbList, FAQPage, Graph, HomeAndConstructionBusiness, Thing, WithContext } from "schema-dts";
-import { business as localBusiness, SITE_URL, type Business } from "@/content/business";
+import { business as localBusiness, IS_NOINDEX, SITE_URL, type Business } from "@/content/business";
 import type { Faq, Service, Zone } from "@/content/types";
 
 export const abs = (path = "/") => `${SITE_URL}${path.startsWith("/") ? path : `/${path}`}`;
@@ -22,7 +22,11 @@ export function pageMetadata({
     title: { absolute: title },
     description,
     alternates: { canonical: path },
-    robots: noindex ? { index: false, follow: true } : undefined,
+    robots: IS_NOINDEX
+      ? { index: false, follow: false, nocache: true, googleBot: { index: false, follow: false, noimageindex: true } }
+      : noindex
+        ? { index: false, follow: true }
+        : undefined,
     openGraph: {
       type: ogType,
       locale: "fr_FR",
