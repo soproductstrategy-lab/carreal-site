@@ -1,26 +1,253 @@
 @import "tailwindcss";
 
+/*
+ * Carreal — direction « Le camion »
+ * Le site est le flanc d'un camion Carreal : tôle alu, grand rond rouge coupé par le bord,
+ * frise de carreaux, lettrage large et gras. Le reste est sobre : formats, prix, le numéro du patron.
+ * Une seule famille (Archivo, OFL) en trois largeurs. Pas de serif, pas de mono, pas de crème.
+ */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --alu: #ecedea;
+  --alu-2: #e0e2de;
+  --blanc: #fbfbf9;
+  --joint: #c4c7c3;
+  --frise: #a6aaad;
+  --bord-champ: #7d8287;
+  --anthracite: #1f2124;
+  --anthracite-2: #2c2f33;
+  --gris: #555a5f;
+  --gris-clair: #a3a7ab;
+  --rouge: #e1251b;
+  --rouge-fonce: #b8180f;
+  --rouge-nuit: #8e1009;
+  --rouge-clair: #ff8a80;
+  --carte-eau: #d3dde0;
+  --joint-w: 6px;
+}
+
+:root:not(:has(#sanity)) {
+  color-scheme: light;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-alu: var(--alu);
+  --color-alu-2: var(--alu-2);
+  --color-blanc: var(--blanc);
+  --color-joint: var(--joint);
+  --color-frise: var(--frise);
+  --color-bord-champ: var(--bord-champ);
+  --color-anthracite: var(--anthracite);
+  --color-anthracite-2: var(--anthracite-2);
+  --color-gris: var(--gris);
+  --color-gris-clair: var(--gris-clair);
+  --color-rouge: var(--rouge);
+  --color-rouge-fonce: var(--rouge-fonce);
+  --color-rouge-nuit: var(--rouge-nuit);
+  --color-rouge-clair: var(--rouge-clair);
+
+  --font-sans: var(--font-archivo), Arial, system-ui, sans-serif;
+
+  --breakpoint-xs: 26rem;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+html {
+  -webkit-text-size-adjust: 100%;
+  scroll-behavior: smooth;
+}
+
+body:not(:has(#sanity)) {
+  background: var(--alu);
+  color: var(--anthracite);
+  font-family: var(--font-sans);
+  font-weight: 420;
+  font-stretch: 100%;
+  font-size: 1.0625rem;
+  line-height: 1.55;
+  font-feature-settings: "lnum";
+  overflow-x: clip;
+}
+
+::selection {
+  background: var(--rouge);
+  color: #fff;
+}
+
+body:not(:has(#sanity)) :focus-visible {
+  outline: 3px solid var(--anthracite);
+  outline-offset: 3px;
+}
+
+img {
+  height: auto;
+}
+
+p {
+  text-wrap: pretty;
+}
+
+/* ---------- Rôles typographiques ---------- */
+@utility t-camion {
+  font-stretch: 125%;
+  font-weight: 860;
+  text-transform: uppercase;
+  line-height: 0.94;
+  letter-spacing: 0;
+}
+@utility t-titre {
+  font-stretch: 112%;
+  font-weight: 760;
+  line-height: 1.04;
+  letter-spacing: -0.005em;
+}
+@utility t-etiquette {
+  font-stretch: 75%;
+  font-weight: 650;
+  font-size: 0.9375rem;
+  line-height: 1.2;
+  letter-spacing: 0.005em;
+}
+@utility t-format {
+  font-stretch: 62%;
+  font-weight: 820;
+  line-height: 0.9;
+  letter-spacing: -0.01em;
+  font-feature-settings: "tnum", "lnum";
+}
+@utility tnum {
+  font-feature-settings: "tnum", "lnum";
+}
+
+/* ---------- Signatures ---------- */
+/* La frise : rangée de carreaux du flanc du camion. Multiply = gris sur l'alu, rouge sombre sur le rond. */
+@utility frise {
+  height: 46px;
+  background: repeating-linear-gradient(90deg, var(--frise) 0 46px, transparent 46px calc(46px + var(--joint-w)));
+  mix-blend-mode: multiply;
+}
+@utility frise-fine {
+  height: 18px;
+  background: repeating-linear-gradient(90deg, var(--frise) 0 18px, transparent 18px 22px);
+  mix-blend-mode: multiply;
+}
+@utility frise-sombre {
+  height: 46px;
+  background: repeating-linear-gradient(90deg, #3a3e43 0 46px, transparent 46px calc(46px + var(--joint-w)));
+}
+/* Le calepinage décalé : grille à joints réels, les enfants fixent leur col-span */
+@utility pose {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: var(--joint-w);
+  background: var(--joint);
+  border: var(--joint-w) solid var(--joint);
+}
+/* Le cabochon : petit carreau rouge à l'intersection des joints, au survol */
+@utility cabochon {
+  position: relative;
+  &::after {
+    content: "";
+    position: absolute;
+    z-index: 2;
+    width: 16px;
+    height: 16px;
+    right: calc(-1 * var(--joint-w) / 2 - 8px);
+    top: calc(-1 * var(--joint-w) / 2 - 8px);
+    background: var(--rouge);
+    transform: scale(0);
+    transition: transform 0.18s ease-out;
+  }
+  &:hover::after,
+  &:focus-visible::after {
+    transform: scale(1);
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+/* ---------- Texte long ---------- */
+.prose-carreal {
+  max-width: 68ch;
+  font-size: 1.0625rem;
+  line-height: 1.65;
+}
+.prose-carreal > * + * {
+  margin-top: 1.1em;
+}
+.prose-carreal h2 {
+  font-stretch: 112%;
+  font-weight: 760;
+  font-size: clamp(1.6rem, 1.15rem + 1.4vw, 2.2rem);
+  line-height: 1.08;
+  margin-top: 2em;
+}
+.prose-carreal h3 {
+  font-weight: 700;
+  font-size: 1.2rem;
+  margin-top: 1.7em;
+}
+.prose-carreal a {
+  color: var(--rouge-fonce);
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 3px;
+}
+.prose-carreal a:hover {
+  color: var(--anthracite);
+}
+.prose-carreal strong {
+  font-weight: 650;
+}
+.prose-carreal ul {
+  list-style: none;
+  padding: 0;
+}
+.prose-carreal ul > li {
+  position: relative;
+  padding-left: 1.4rem;
+}
+.prose-carreal ul > li + li {
+  margin-top: 0.5rem;
+}
+.prose-carreal ul > li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.6em;
+  width: 0.5rem;
+  height: 0.5rem;
+  background: var(--anthracite);
+}
+.prose-carreal table {
+  font-feature-settings: "tnum";
+  border-collapse: collapse;
+}
+
+/* Étapes numérotées (compteur CSS, pas de zéro devant) */
+.etapes {
+  counter-reset: etape;
+}
+.etapes > li {
+  counter-increment: etape;
+}
+.etapes > li::before {
+  content: counter(etape);
+  display: block;
+  font-stretch: 62%;
+  font-weight: 820;
+  font-size: 2.4rem;
+  line-height: 0.9;
+  font-feature-settings: "tnum";
+}
+
+details > summary {
+  list-style: none;
+  cursor: pointer;
+}
+details > summary::-webkit-details-marker {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::after {
+    transition: none !important;
+  }
 }
