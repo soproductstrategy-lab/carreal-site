@@ -1,21 +1,37 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { type SanityDocument, useDocumentOperation } from "sanity";
+import { type SanityDocument, useClient, useDocumentOperation } from "sanity";
 import type { UserViewComponent } from "sanity/structure";
-import { dataset, projectId } from "@/sanity/env";
+import { ArticleImageStudio } from "@/sanity/components/ArticleImageStudio";
+import { apiVersion, dataset, projectId } from "@/sanity/env";
 import {
+  base64ToBlob,
   consumePendingGuideBrief,
+  generateArticleSlotImage,
+  readLocalImageFile,
   streamStudioAi,
+  StudioImageApiError,
   type AiProposal,
+  type ArticleImagePlan,
+  type ArticleImagePreference,
+  type ExistingImageScope,
   type GuideAngle,
   type GuideIdea,
   type IdeaTheme,
+  type ImagePlanSlot,
   type LocalFocus,
+  type SlotImageState,
   type StreamProgress,
 } from "@/sanity/lib/studioAiClient";
 
-type PhotoRef = { _key?: string; asset?: { _ref?: string }; alt?: string };
+type PhotoRef = { _key?: string; _type?: string; asset?: { _ref?: string }; alt?: string };
+
+let sanityKeyCounter = 0;
+function makeSanityKey(): string {
+  sanityKeyCounter += 1;
+  return `img${sanityKeyCounter.toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+}
 
 function sanityRefToUrl(ref?: string): string | null {
   if (!ref || !projectId) return null;
@@ -24,9 +40,11 @@ function sanityRefToUrl(ref?: string): string | null {
   return `https://cdn.sanity.io/images/${projectId}/${dataset}/${m[1]}-${m[2]}.${m[3]}`;
 }
 
-function extractPhotoRefs(doc: SanityDocument | null): { key?: string; url: string; alt?: string; field: "photos" | "image" | "photo" | "hero.photo" }[] {
+function extractPhotoRefs(
+  doc: SanityDocument | null,
+): { key?: string; url: string; alt?: string; field: "photos" | "image" | "photo" | "hero.photo" | "body" }[] {
   if (!doc) return [];
-  const out: { key?: string; url: string; alt?: string; field: "photos" | "image" | "photo" | "hero.photo" }[] = [];
+  const out: { key?: string; url: string; alt?: string; field: "photos" | "image" | "photo" | "hero.photo" | "body" }[] = [];
 
   if (Array.isArray(doc.photos)) {
     for (const item of doc.photos as PhotoRef[]) {
@@ -49,7 +67,65 @@ function extractPhotoRefs(doc: SanityDocument | null): { key?: string; url: stri
     const url = sanityRefToUrl(heroPhoto.asset._ref);
     if (url) out.push({ url, alt: heroPhoto.alt, field: "hero.photo" });
   }
+  if (Array.isArray(doc.body)) {
+    for (const item of doc.body as PhotoRef[]) {
+      if (item?._type === "illustration" && item.asset?._ref) {
+        const url = sanityRefToUrl(item.asset._ref);
+        if (url) out.push({ key: item._key, url, alt: item.alt, field: "body" });
+      }
+    }
+  }
   return out;
+}
+
+function portableNodeHeadingText(node: unknown): string {
+  if (!node || typeof node !== "object") return "";
+  const o = node as Record<string, unknown>;
+  if (o._type !== "block" || o.style !== "h2" || !Array.isArray(o.children)) return "";
+  return (o.children as { text?: string }[])
+    .map((c) => c.text ?? "")
+    .join("")
+    .trim();
+}
+
+/**
+ * Insère proprement des blocs `illustration` dans un tableau Portable Text `body`,
+ * juste après le premier paragraphe suivant le sous-titre H2 cible (ou au milieu si aucun H2 ne correspond).
+ */
+function insertIllustrationsIntoBody(
+  baseBody: unknown[],
+  insertions: { afterHeading?: string; block: Record<string, unknown> }[],
+): unknown[] {
+  const next = [...baseBody];
+  for (const ins of insertions) {
+    const target = (ins.afterHeading ?? "").trim().toLowerCase();
+    let insertAt = -1;
+
+    if (target) {
+      const h2Index = next.findIndex((node) => {
+        const text = portableNodeHeadingText(node).toLowerCase();
+        return text === target || (text.length > 8 && (text.includes(target) || target.includes(text)));
+      });
+      if (h2Index >= 0) {
+        // Place l'image après le 1er bloc de contenu sous ce H2 (sans dépasser le H2 suivant)
+        let cursor = h2Index + 1;
+        while (cursor < next.length) {
+          const cur = next[cursor] as Record<string, unknown> | undefined;
+          if (cur?._type === "block" && cur.style === "h2") break;
+          cursor += 1;
+          if (cur?._type === "block" && cur.style === "normal") break;
+        }
+        insertAt = cursor;
+      }
+    }
+
+    if (insertAt < 0) {
+      insertAt = Math.min(next.length, Math.max(1, Math.floor(next.length / 2)));
+    }
+
+    next.splice(insertAt, 0, ins.block);
+  }
+  return next;
 }
 
 function getSeoSnapshot(doc: SanityDocument | null) {
@@ -286,6 +362,22 @@ const IDEA_THEMES: { value: IdeaTheme; label: string }[] = [
   { value: "tendances", label: "📐 Grand format" },
 ];
 
+const NEW_ARTICLE_IMAGE_OPTIONS: { value: ArticleImagePreference; label: string; hint: string }[] = [
+  { value: "auto", label: "✨ Recommandé (auto)", hint: "L'IA recommande 1 à 3 visuels selon la longueur" },
+  { value: "none", label: "Sans image", hint: "Texte + SEO uniquement" },
+  { value: "1", label: "1 (couverture)", hint: "Couverture 4:3 Google Discover" },
+  { value: "2", label: "2 images", hint: "1 couverture 4:3 + 1 dans le corps" },
+  { value: "3", label: "3 images", hint: "1 couverture 4:3 + 2 dans le corps" },
+];
+
+const EXISTING_IMAGE_SCOPES: { value: ExistingImageScope; label: string }[] = [
+  { value: "auto", label: "✨ Recommandé" },
+  { value: "cover-only", label: "Couverture seule" },
+  { value: "body-only", label: "Corps uniquement" },
+  { value: "2", label: "2 images" },
+  { value: "3", label: "3 images" },
+];
+
 function mergePatchForPreview(
   baseDoc: SanityDocument | null,
   patchObj: Record<string, unknown> | undefined,
@@ -320,16 +412,19 @@ function mergePatchForPreview(
 export const AiAssistantView: UserViewComponent = ({ document, documentId, schemaType }) => {
   const displayed = (document.displayed ?? document.draft ?? document.published) as SanityDocument | null;
   const cleanId = documentId.replace(/^drafts\./, "");
+  const client = useClient({ apiVersion });
   const { patch, commit } = useDocumentOperation(cleanId, schemaType.name);
 
   const [initialBrief] = useState(() => (schemaType.name === "guide" ? consumePendingGuideBrief() : null));
-  const [status, setStatus] = useState<{ loading: boolean; configured: boolean; model?: string; streaming?: boolean }>({
+  const [status, setStatus] = useState<{ loading: boolean; configured: boolean; model?: string; imageModel?: string; streaming?: boolean }>({
     loading: true,
     configured: false,
   });
   const [notes, setNotes] = useState(() => initialBrief?.notes ?? "");
   const [angle, setAngle] = useState<GuideAngle>(() => initialBrief?.angle ?? "auto");
   const [localFocus, setLocalFocus] = useState<LocalFocus>(() => initialBrief?.localFocus ?? "annecy");
+  const [imagePref, setImagePref] = useState<ArticleImagePreference>("auto");
+  const [existingImageScope, setExistingImageScope] = useState<ExistingImageScope>("auto");
   const [ideaTheme, setIdeaTheme] = useState<IdeaTheme>("all");
   const [ideas, setIdeas] = useState<GuideIdea[]>([]);
 
@@ -341,7 +436,12 @@ export const AiAssistantView: UserViewComponent = ({ document, documentId, schem
   const [appliedDoc, setAppliedDoc] = useState<SanityDocument | null>(null);
   const [applying, setApplying] = useState(false);
 
+  const [imagePlan, setImagePlan] = useState<ArticleImagePlan | null>(null);
+  const [imageSlots, setImageSlots] = useState<SlotImageState[]>([]);
+  const [generatingImages, setGeneratingImages] = useState(false);
+
   const abortRef = useRef<AbortController | null>(null);
+  const imageAbortRef = useRef<AbortController | null>(null);
   const autoTriggeredRef = useRef(false);
 
   const isRealisation = schemaType.name === "realisation";
@@ -352,10 +452,10 @@ export const AiAssistantView: UserViewComponent = ({ document, documentId, schem
     let active = true;
     fetch("/api/studio-ai/")
       .then((r) => r.json())
-      .then((d: { configured?: boolean; model?: string; streaming?: boolean }) => {
+      .then((d: { configured?: boolean; model?: string; imageModel?: string; streaming?: boolean }) => {
         if (!active) return;
         const configured = Boolean(d.configured);
-        setStatus({ loading: false, configured, model: d.model, streaming: Boolean(d.streaming) });
+        setStatus({ loading: false, configured, model: d.model, imageModel: d.imageModel, streaming: Boolean(d.streaming) });
         if (configured && initialBrief?.autoRun && !autoTriggeredRef.current) {
           autoTriggeredRef.current = true;
           void runAction("generate-guide", {
@@ -371,12 +471,17 @@ export const AiAssistantView: UserViewComponent = ({ document, documentId, schem
     return () => {
       active = false;
       abortRef.current?.abort();
+      imageAbortRef.current?.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const photos = useMemo(() => extractPhotoRefs(displayed), [displayed]);
   const missingAlts = photos.filter((p) => !p.alt?.trim()).length;
+  const readyIncludedImages = useMemo(
+    () => imageSlots.filter((s) => s.included && s.status === "ready" && s.image),
+    [imageSlots],
+  );
 
   // Document effectif pour l'aperçu Google & le score SEO/GEO :
   // - si une proposition IA est prête, on prévisualise immédiatement son impact,
@@ -386,16 +491,132 @@ export const AiAssistantView: UserViewComponent = ({ document, documentId, schem
     () => (proposal?.patch ? mergePatchForPreview(baseForAudit, proposal.patch, schemaType.name) : baseForAudit),
     [baseForAudit, proposal?.patch, schemaType.name],
   );
+  const projectedPhotoCount = photos.length + readyIncludedImages.length;
   const effectiveMissingAlts = proposal?.photoAlts?.length ? Math.max(0, missingAlts - proposal.photoAlts.length) : missingAlts;
   const seo = useMemo(() => getSeoSnapshot(effectiveDoc), [effectiveDoc]);
   const seoAudit = useMemo(
-    () => evaluateSeoScore(effectiveDoc, schemaType.name, photos.length, effectiveMissingAlts),
-    [effectiveDoc, schemaType.name, photos.length, effectiveMissingAlts],
+    () => evaluateSeoScore(effectiveDoc, schemaType.name, projectedPhotoCount, effectiveMissingAlts),
+    [effectiveDoc, schemaType.name, projectedPhotoCount, effectiveMissingAlts],
   );
   const currentAudit = useMemo(
     () => evaluateSeoScore(baseForAudit, schemaType.name, photos.length, missingAlts),
     [baseForAudit, schemaType.name, photos.length, missingAlts],
   );
+
+  async function generateImagesForSlotIds(targetSlots: ImagePlanSlot[], focusOverride?: LocalFocus) {
+    if (!targetSlots.length) return;
+    imageAbortRef.current?.abort();
+    const controller = new AbortController();
+    imageAbortRef.current = controller;
+    setGeneratingImages(true);
+
+    try {
+      for (const slot of targetSlots) {
+        if (controller.signal.aborted) break;
+        setImageSlots((prev) =>
+          prev.map((item) =>
+            item.slot.id === slot.id ? { ...item, status: "generating", error: undefined, errorCode: undefined } : item,
+          ),
+        );
+        try {
+          const generated = await generateArticleSlotImage(slot, {
+            localFocus: focusOverride ?? localFocus,
+            signal: controller.signal,
+          });
+          setImageSlots((prev) =>
+            prev.map((item) =>
+              item.slot.id === slot.id
+                ? {
+                    ...item,
+                    status: "ready",
+                    image: generated,
+                    slot: { ...item.slot, seoFilename: generated.seoFilename },
+                    error: undefined,
+                    errorCode: undefined,
+                  }
+                : item,
+            ),
+          );
+        } catch (err) {
+          if (err instanceof Error && err.name === "AbortError") break;
+          const isApiErr = err instanceof StudioImageApiError;
+          const msg = err instanceof Error ? err.message : "Erreur lors de la génération d'image.";
+          const code = isApiErr ? err.code : undefined;
+          const helpUrl = isApiErr ? err.helpUrl : undefined;
+
+          setImageSlots((prev) =>
+            prev.map((item) =>
+              item.slot.id === slot.id ? { ...item, status: "error", error: msg, errorCode: code, helpUrl } : item,
+            ),
+          );
+
+          // Si Google AI Studio renvoie Free Tier limit: 0, inutile de boucler sur les slots suivants
+          if (code === "IMAGE_BILLING_REQUIRED") break;
+        }
+      }
+    } finally {
+      setGeneratingImages(false);
+    }
+  }
+
+  async function planArticleImages(
+    targetDoc: Record<string, unknown>,
+    scope: ExistingImageScope | ArticleImagePreference,
+    opts: { autoGenerate: boolean; focusOverride?: LocalFocus; angleOverride?: GuideAngle } = { autoGenerate: true },
+  ) {
+    if (scope === "none") return;
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    setError(null);
+    setAppliedMsg(null);
+    setBusyAction("plan-article-images");
+    setStreamProgress({ stage: "Analyse de l'article et calcul des visuels SEO recommandés…", chars: 0, elapsedMs: 0 });
+
+    try {
+      const data = await streamStudioAi(
+        {
+          action: "plan-article-images",
+          docType: "guide",
+          notes,
+          angle: opts.angleOverride ?? angle,
+          localFocus: opts.focusOverride ?? localFocus,
+          imageScope: scope,
+          document: targetDoc,
+        },
+        {
+          signal: controller.signal,
+          onProgress: (p) => setStreamProgress(p),
+        },
+      );
+
+      if (data.imagePlan) {
+        const initialStates: SlotImageState[] = data.imagePlan.slots.map((slot) => ({
+          slot,
+          status: "planned",
+          included: true,
+        }));
+        setImagePlan(data.imagePlan);
+        setImageSlots(initialStates);
+        setBusyAction(null);
+        setStreamProgress(null);
+
+        if (opts.autoGenerate && data.imagePlan.slots.length > 0) {
+          void generateImagesForSlotIds(data.imagePlan.slots, opts.focusOverride);
+        }
+      }
+    } catch (e) {
+      if (e instanceof Error && e.name === "AbortError") {
+        setError("Planification des images interrompue.");
+      } else {
+        setError(e instanceof Error ? e.message : "Impossible de planifier les images.");
+      }
+    } finally {
+      setBusyAction(null);
+      setStreamProgress(null);
+    }
+  }
 
   async function runAction(
     action: string,
@@ -408,12 +629,17 @@ export const AiAssistantView: UserViewComponent = ({ document, documentId, schem
     },
   ) {
     abortRef.current?.abort();
+    imageAbortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
 
     setError(null);
     setAppliedMsg(null);
-    if (action !== "suggest-guide-ideas") setProposal(null);
+    if (action !== "suggest-guide-ideas") {
+      setProposal(null);
+      setImagePlan(null);
+      setImageSlots([]);
+    }
     setStreamProgress({ stage: "Connexion à Gemini…", chars: 0, elapsedMs: 0 });
     setBusyAction(action + (extra?.mode ?? ""));
 
@@ -440,6 +666,18 @@ export const AiAssistantView: UserViewComponent = ({ document, documentId, schem
         setIdeas(data.ideas ?? []);
       } else {
         setProposal(data);
+        // Si c'est un nouvel article et que les illustrations sont activées, enchaîne la planification + génération d'images SEO
+        if (action === "generate-guide" && data.patch && imagePref !== "none") {
+          const mergedArticle = mergePatchForPreview(displayed, data.patch, schemaType.name);
+          setBusyAction(null);
+          setStreamProgress(null);
+          void planArticleImages(mergedArticle as Record<string, unknown>, imagePref, {
+            autoGenerate: true,
+            focusOverride: extra?.localFocusOverride ?? localFocus,
+            angleOverride: extra?.angleOverride ?? angle,
+          });
+          return;
+        }
       }
     } catch (e) {
       if (e instanceof Error && e.name === "AbortError") {
@@ -455,6 +693,7 @@ export const AiAssistantView: UserViewComponent = ({ document, documentId, schem
 
   function stopStreaming() {
     abortRef.current?.abort();
+    imageAbortRef.current?.abort();
   }
 
   function pickIdeaAndWrite(idea: GuideIdea) {
@@ -469,8 +708,102 @@ export const AiAssistantView: UserViewComponent = ({ document, documentId, schem
     });
   }
 
-  function applyProposal() {
-    if (!proposal) return;
+  function handleGenerateSingleSlot(slotId: string) {
+    const target = imageSlots.find((s) => s.slot.id === slotId);
+    if (!target) return;
+    void generateImagesForSlotIds([target.slot]);
+  }
+
+  function handleGenerateAllMissing() {
+    const targets = imageSlots.filter((s) => s.included && (s.status === "planned" || s.status === "error")).map((s) => s.slot);
+    if (!targets.length) return;
+    void generateImagesForSlotIds(targets);
+  }
+
+  async function handleUploadLocalFile(slotId: string, file: File) {
+    try {
+      const { dataUrl, width, height } = await readLocalImageFile(file);
+      const ext = file.type === "image/png" ? "png" : "jpg";
+      setImageSlots((prev) =>
+        prev.map((item) => {
+          if (item.slot.id !== slotId) return item;
+          const baseFilename = item.slot.seoFilename.replace(/\.(jpe?g|png|webp)$/i, "");
+          const seoFilename = `${baseFilename || "carrelage-annecy"}.${ext}`;
+          return {
+            ...item,
+            status: "ready",
+            error: undefined,
+            errorCode: undefined,
+            slot: { ...item.slot, seoFilename },
+            image: {
+              dataUrl,
+              file,
+              mimeType: file.type || "image/jpeg",
+              width,
+              height,
+              seoFilename,
+              source: "upload",
+            },
+          };
+        }),
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Impossible d'importer cette photo.");
+    }
+  }
+
+  function handleUpdateSlotMeta(slotId: string, metaPatch: Partial<Pick<ImagePlanSlot, "alt" | "caption" | "seoFilename">>) {
+    setImageSlots((prev) =>
+      prev.map((item) => (item.slot.id === slotId ? { ...item, slot: { ...item.slot, ...metaPatch } } : item)),
+    );
+  }
+
+  function handleToggleInclude(slotId: string) {
+    setImageSlots((prev) => prev.map((item) => (item.slot.id === slotId ? { ...item, included: !item.included } : item)));
+  }
+
+  /** Upload sur le CDN Sanity (avec session Studio connectée + nom de fichier SEO). */
+  async function uploadReadySlotsToSanity(entries: SlotImageState[]) {
+    let heroImage: Record<string, unknown> | undefined;
+    const bodyInsertions: { afterHeading?: string; block: Record<string, unknown> }[] = [];
+
+    for (const entry of entries) {
+      if (!entry.image) continue;
+      const filename = entry.slot.seoFilename.trim() || "carrelage-annecy.jpg";
+      const contentType = entry.image.mimeType || "image/jpeg";
+      const payloadBlob: Blob | File = entry.image.file ?? base64ToBlob(entry.image.base64 ?? "", contentType);
+
+      const asset = await client.assets.upload("image", payloadBlob, {
+        filename,
+        contentType,
+      });
+
+      if (entry.slot.role === "hero") {
+        heroImage = {
+          _type: "image",
+          asset: { _type: "reference", _ref: asset._id },
+          alt: entry.slot.alt.trim(),
+          ...(entry.slot.caption.trim() ? { caption: entry.slot.caption.trim() } : {}),
+        };
+      } else {
+        bodyInsertions.push({
+          afterHeading: entry.slot.afterHeading,
+          block: {
+            _type: "illustration",
+            _key: makeSanityKey(),
+            asset: { _type: "reference", _ref: asset._id },
+            alt: entry.slot.alt.trim(),
+            ...(entry.slot.caption.trim() ? { caption: entry.slot.caption.trim() } : {}),
+          },
+        });
+      }
+    }
+
+    return { heroImage, bodyInsertions };
+  }
+
+  async function applyProposal() {
+    if (!proposal && readyIncludedImages.length === 0) return;
     if (patch.disabled) {
       setError(`Impossible de modifier ce brouillon pour l'instant (${String(patch.disabled)}).`);
       return;
@@ -478,23 +811,57 @@ export const AiAssistantView: UserViewComponent = ({ document, documentId, schem
     setApplying(true);
     setError(null);
     try {
-      const setObj: Record<string, unknown> = { ...(proposal.patch ?? {}) };
+      const setObj: Record<string, unknown> = { ...(proposal?.patch ?? {}) };
 
-      if (proposal.photoAlts?.length && photos.length > 0) {
+      if (proposal?.photoAlts?.length && photos.length > 0) {
+        const altByKey = new Map(proposal.photoAlts.filter((a) => a.key).map((a) => [a.key!, a.alt]));
         const firstField = photos[0].field;
         if (firstField === "photos" && Array.isArray(displayed?.photos)) {
-          const altByKey = new Map(proposal.photoAlts.filter((a) => a.key).map((a) => [a.key!, a.alt]));
           const updatedPhotos = (displayed.photos as PhotoRef[]).map((item, idx) => {
             const nextAlt = (item._key && altByKey.get(item._key)) || proposal.photoAlts?.[idx]?.alt;
             return nextAlt ? { ...item, alt: nextAlt } : item;
           });
           setObj.photos = updatedPhotos;
-        } else if (firstField === "image" && proposal.photoAlts[0]?.alt) {
-          setObj["image.alt"] = proposal.photoAlts[0].alt;
-        } else if (firstField === "photo" && proposal.photoAlts[0]?.alt) {
-          setObj["photo.alt"] = proposal.photoAlts[0].alt;
-        } else if (firstField === "hero.photo" && proposal.photoAlts[0]?.alt) {
-          setObj["hero.photo.alt"] = proposal.photoAlts[0].alt;
+        } else {
+          const coverPhotoIdx = photos.findIndex((p) => p.field === "image");
+          if (coverPhotoIdx >= 0 && proposal.photoAlts[coverPhotoIdx]?.alt) {
+            setObj["image.alt"] = proposal.photoAlts[coverPhotoIdx].alt;
+          } else if (firstField === "photo" && proposal.photoAlts[0]?.alt) {
+            setObj["photo.alt"] = proposal.photoAlts[0].alt;
+          } else if (firstField === "hero.photo" && proposal.photoAlts[0]?.alt) {
+            setObj["hero.photo.alt"] = proposal.photoAlts[0].alt;
+          }
+
+          // Met aussi à jour les alt des illustrations inline dans `body`
+          if (Array.isArray(displayed?.body) && photos.some((p) => p.field === "body")) {
+            let changedBody = false;
+            const updatedBody = (displayed.body as PhotoRef[]).map((node) => {
+              if (node?._type === "illustration" && node._key && altByKey.has(node._key)) {
+                changedBody = true;
+                return { ...node, alt: altByKey.get(node._key) };
+              }
+              return node;
+            });
+            if (changedBody) setObj.body = updatedBody;
+          }
+        }
+      }
+
+      // Upload des visuels IA / importés vers Sanity CDN et injection dans `image` + `body`
+      let uploadedCount = 0;
+      if (readyIncludedImages.length > 0) {
+        const { heroImage, bodyInsertions } = await uploadReadySlotsToSanity(readyIncludedImages);
+        uploadedCount = (heroImage ? 1 : 0) + bodyInsertions.length;
+        if (heroImage) {
+          setObj.image = heroImage;
+        }
+        if (bodyInsertions.length > 0) {
+          const baseBody = Array.isArray(setObj.body)
+            ? (setObj.body as unknown[])
+            : Array.isArray(displayed?.body)
+              ? (displayed.body as unknown[])
+              : [];
+          setObj.body = insertIllustrationsIntoBody(baseBody, bodyInsertions);
         }
       }
 
@@ -504,8 +871,16 @@ export const AiAssistantView: UserViewComponent = ({ document, documentId, schem
           commit.execute();
         }
         setAppliedDoc(mergePatchForPreview(displayed, setObj, schemaType.name));
-        setAppliedMsg("Brouillon enregistré dans Sanity ! Relisez dans « Éditer », vérifiez dans « 👁 Aperçu », puis cliquez sur « Publier ».");
+        setAppliedMsg(
+          uploadedCount > 0
+            ? `Brouillon enregistré dans Sanity avec ${uploadedCount} image${uploadedCount > 1 ? "s" : ""} SEO uploadée${uploadedCount > 1 ? "s" : ""} ! Relisez dans « Éditer », vérifiez dans « 👁 Aperçu », puis cliquez sur « Publier ».`
+            : "Brouillon enregistré dans Sanity ! Relisez dans « Éditer », vérifiez dans « 👁 Aperçu », puis cliquez sur « Publier ».",
+        );
         setProposal(null);
+        if (uploadedCount > 0) {
+          setImagePlan(null);
+          setImageSlots([]);
+        }
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Impossible d'appliquer les modifications.");
@@ -676,6 +1051,25 @@ export const AiAssistantView: UserViewComponent = ({ document, documentId, schem
                   ))}
                 </div>
               </div>
+
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 750, color: "#555a5f", textTransform: "uppercase", marginBottom: 6 }}>
+                  🖼️ Illustrations SEO à la création de l&apos;article (couverture 4:3 + corps 16:9)
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {NEW_ARTICLE_IMAGE_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      title={opt.hint}
+                      onClick={() => setImagePref(opt.value)}
+                      style={pillStyle(imagePref === opt.value)}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
           )}
 
@@ -707,7 +1101,34 @@ export const AiAssistantView: UserViewComponent = ({ document, documentId, schem
                   onClick={() => runAction("generate-guide")}
                   style={{ ...btnPrimary, opacity: disabled ? 0.55 : 1, cursor: disabled ? "not-allowed" : "pointer" }}
                 >
-                  ✨ {busyAction === "generate-guide" ? "Rédaction en direct…" : "Rédiger l'article complet (SEO, tableau & FAQ)"}
+                  ✨{" "}
+                  {busyAction === "generate-guide"
+                    ? "Rédaction en direct…"
+                    : imagePref === "none"
+                      ? "Rédiger l'article complet (sans image)"
+                      : "Rédiger l'article complet + illustrations SEO"}
+                </button>
+              )}
+
+              {isGuide && (
+                <button
+                  type="button"
+                  disabled={disabled || generatingImages}
+                  onClick={() =>
+                    planArticleImages((effectiveDoc ?? {}) as Record<string, unknown>, existingImageScope, {
+                      autoGenerate: true,
+                    })
+                  }
+                  style={{
+                    ...btnSecondary,
+                    opacity: disabled || generatingImages ? 0.55 : 1,
+                    cursor: disabled || generatingImages ? "not-allowed" : "pointer",
+                  }}
+                >
+                  🖼️{" "}
+                  {busyAction === "plan-article-images"
+                    ? "Planification SEO…"
+                    : "Illustrer cet article (couverture + corps)"}
                 </button>
               )}
 
@@ -735,6 +1156,39 @@ export const AiAssistantView: UserViewComponent = ({ document, documentId, schem
                 </button>
               )}
             </div>
+
+            {isGuide && (
+              <div
+                style={{
+                  marginTop: 12,
+                  padding: "10px 12px",
+                  background: "#ffffff",
+                  border: "1px dashed #c4c7c3",
+                  borderRadius: 3,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 10,
+                  flexWrap: "wrap",
+                }}
+              >
+                <span style={{ fontSize: 12.5, color: "#475569", fontWeight: 600 }}>
+                  Article déjà en brouillon ou publié ? Choisissez quoi illustrer sans toucher au texte :
+                </span>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {EXISTING_IMAGE_SCOPES.map((sc) => (
+                    <button
+                      key={sc.value}
+                      type="button"
+                      onClick={() => setExistingImageScope(sc.value)}
+                      style={pillStyle(existingImageScope === sc.value)}
+                    >
+                      {sc.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {hasRichBody && (
               <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
@@ -840,6 +1294,28 @@ export const AiAssistantView: UserViewComponent = ({ document, documentId, schem
           </div>
         )}
 
+        {/* Plan visuel & génération d'images SEO (nouveau ou article existant) */}
+        {imagePlan && imageSlots.length > 0 && (
+          <ArticleImageStudio
+            plan={imagePlan}
+            slots={imageSlots}
+            busyGenerating={generatingImages}
+            applying={applying}
+            hasTextProposal={Boolean(proposal)}
+            onGenerateSlot={handleGenerateSingleSlot}
+            onGenerateAllMissing={handleGenerateAllMissing}
+            onUploadLocalFile={handleUploadLocalFile}
+            onUpdateSlotMeta={handleUpdateSlotMeta}
+            onToggleInclude={handleToggleInclude}
+            onDismissPlan={() => {
+              imageAbortRef.current?.abort();
+              setImagePlan(null);
+              setImageSlots([]);
+            }}
+            onApplyImagesOnly={applyProposal}
+          />
+        )}
+
         {/* Proposition finale prête à appliquer */}
         {proposal && (
           <div style={{ ...cardStyle, background: "#f0fdf4", border: "2px solid #22c55e" }}>
@@ -852,10 +1328,14 @@ export const AiAssistantView: UserViewComponent = ({ document, documentId, schem
                 <button
                   type="button"
                   onClick={applyProposal}
-                  disabled={applying}
-                  style={{ ...btnPrimary, background: "#15803d", borderColor: "#15803d" }}
+                  disabled={applying || generatingImages}
+                  style={{ ...btnPrimary, background: "#15803d", borderColor: "#15803d", opacity: applying || generatingImages ? 0.65 : 1 }}
                 >
-                  {applying ? "Application…" : "Appliquer dans le brouillon"}
+                  {applying
+                    ? "Enregistrement & upload…"
+                    : readyIncludedImages.length > 0
+                      ? `Appliquer article + ${readyIncludedImages.length} image${readyIncludedImages.length > 1 ? "s" : ""}`
+                      : "Appliquer dans le brouillon"}
                 </button>
               </div>
             </div>
@@ -983,10 +1463,14 @@ export const AiAssistantView: UserViewComponent = ({ document, documentId, schem
               <button
                 type="button"
                 onClick={applyProposal}
-                disabled={applying}
-                style={{ ...btnPrimary, background: "#15803d", borderColor: "#15803d" }}
+                disabled={applying || generatingImages}
+                style={{ ...btnPrimary, background: "#15803d", borderColor: "#15803d", opacity: applying || generatingImages ? 0.65 : 1 }}
               >
-                {applying ? "Application…" : "✅ Appliquer dans le brouillon"}
+                {applying
+                  ? "Enregistrement & upload…"
+                  : readyIncludedImages.length > 0
+                    ? `✅ Appliquer article + ${readyIncludedImages.length} image${readyIncludedImages.length > 1 ? "s" : ""} dans le brouillon`
+                    : "✅ Appliquer dans le brouillon"}
               </button>
             </div>
           </div>

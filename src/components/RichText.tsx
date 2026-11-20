@@ -1,6 +1,7 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
 import type { Block } from "@/content/types";
+import { imgSrc, imgSrcSet } from "@/lib/img";
 import { fr } from "@/lib/typo";
 
 /** Inline : **gras** et [texte](url), typographie française appliquée. Liens internes via next/link. */
@@ -139,6 +140,30 @@ export function RichText({ blocks }: { blocks: Block[] }) {
                   </div>
                 ))}
               </dl>
+            );
+          case "image":
+            return (
+              <figure key={i} className="!mt-8 bg-blanc p-2 shadow-[0_10px_28px_rgba(31,33,36,0.08)] ring-2 ring-joint/60">
+                <div className="overflow-hidden bg-alu-2">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={imgSrc(b.src, 1200)}
+                    srcSet={imgSrcSet(b.src, [480, 800, 1200, 1600])}
+                    sizes="(min-width: 1024px) 780px, 94vw"
+                    alt={b.alt}
+                    width={b.width}
+                    height={b.height}
+                    loading="lazy"
+                    decoding="async"
+                    className="h-auto w-full object-cover"
+                  />
+                </div>
+                {b.caption && (
+                  <figcaption className="px-1 pt-2.5 pb-1 text-[0.875rem] leading-snug text-gris">
+                    {fr(b.caption)}
+                  </figcaption>
+                )}
+              </figure>
             );
         }
       })}

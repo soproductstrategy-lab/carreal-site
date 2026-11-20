@@ -203,6 +203,12 @@ export function extractLivePreviewFromPartialJson(buf: string, action: string): 
   let stage = "Initialisation Gemini…";
   if (action === "suggest-guide-ideas") {
     stage = ideasTitles.length > 0 ? `Idées SEO trouvées (${ideasTitles.length}/6)…` : "Analyse des recherches clients à Annecy…";
+  } else if (action === "plan-article-images") {
+    const slotsCount = extractAllJsonStringFields(buf, "seoFilename").length;
+    stage =
+      slotsCount > 0
+        ? `Plan visuel SEO préparé (${slotsCount} emplacement${slotsCount > 1 ? "s" : ""})…`
+        : "Analyse de l'article et calcul du nombre d'images recommandé…";
   } else if (action === "generate-alt-texts") {
     const count = (buf.match(/"(?:[^"\\]|\\.)+"/g) ?? []).length;
     stage = count > 1 ? `Rédaction des descriptions photos…` : "Analyse visuelle des photos…";

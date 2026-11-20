@@ -16,7 +16,13 @@ export async function generateStaticParams() {
 export async function generateMetadata({ params }: PageProps<"/conseils/[slug]">): Promise<Metadata> {
   const g = await getGuide((await params).slug);
   if (!g) return {};
-  return pageMetadata({ title: `${g.title} | Carreal`, description: g.metaDescription, path: `/conseils/${g.slug}/`, ogType: "article" });
+  return pageMetadata({
+    title: `${g.title} | Carreal`,
+    description: g.metaDescription,
+    path: `/conseils/${g.slug}/`,
+    ogType: "article",
+    ogImage: g.image?.src,
+  });
 }
 
 const fmt = (d: string) => new Intl.DateTimeFormat("fr-FR", { dateStyle: "long" }).format(new Date(d));
@@ -35,7 +41,7 @@ export default async function GuidePage({ params }: PageProps<"/conseils/[slug]"
           { name: g.category, path: `/conseils/${g.slug}/` },
         ]}
         title={g.h1}
-        aside={g.image ? <Carreau img={g.image} caption="Photo d'illustration" eager /> : undefined}
+        aside={g.image ? <Carreau img={g.image} caption={g.image.caption || "Illustration éditoriale"} eager /> : undefined}
       >
         {/* Réponse directe en tête : le passage le plus cité par les moteurs IA */}
         <p className="mt-8 max-w-[44rem] border-l-[6px] border-rouge bg-blanc px-5 py-4 text-[1.1rem] leading-relaxed">
@@ -87,6 +93,7 @@ export default async function GuidePage({ params }: PageProps<"/conseils/[slug]"
           "@type": "Article",
           headline: g.h1,
           description: g.metaDescription,
+          image: g.image ? [g.image.src] : [abs("/opengraph-image")],
           datePublished: g.published,
           dateModified: g.updated,
           inLanguage: "fr-FR",

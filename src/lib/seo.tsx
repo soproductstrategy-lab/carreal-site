@@ -11,12 +11,14 @@ export function pageMetadata({
   path,
   noindex,
   ogType = "website",
+  ogImage,
 }: {
   title: string;
   description: string;
   path: string;
   noindex?: boolean;
   ogType?: "website" | "article";
+  ogImage?: string;
 }): Metadata {
   return {
     title: { absolute: title },
@@ -26,7 +28,7 @@ export function pageMetadata({
       ? { index: false, follow: false, nocache: true, googleBot: { index: false, follow: false, noimageindex: true } }
       : noindex
         ? { index: false, follow: true }
-        : undefined,
+        : { index: true, follow: true, googleBot: { index: true, follow: true, "max-image-preview": "large" } },
     openGraph: {
       type: ogType,
       locale: "fr_FR",
@@ -34,8 +36,14 @@ export function pageMetadata({
       url: path,
       title,
       description,
+      ...(ogImage ? { images: [{ url: ogImage, width: 1200, height: 896, alt: title }] } : {}),
     },
-    twitter: { card: "summary_large_image", title, description },
+    twitter: {
+      card: "summary_large_image",
+      title,
+      description,
+      ...(ogImage ? { images: [ogImage] } : {}),
+    },
   };
 }
 

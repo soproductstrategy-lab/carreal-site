@@ -89,6 +89,35 @@ const spec = defineArrayMember({
   preview: { prepare: () => ({ title: "Fiche technique" }) },
 });
 
+const illustration = defineArrayMember({
+  name: "illustration",
+  title: "Image dans le corps",
+  type: "image",
+  options: { hotspot: true },
+  fields: [
+    defineField({
+      name: "alt",
+      title: "Description SEO (attribut alt)",
+      type: "string",
+      description: "80 à 135 caractères décrivant concrètement la scène pour Google Images et l'accessibilité.",
+    }),
+    defineField({
+      name: "caption",
+      title: "Légende sous l'image",
+      type: "string",
+      description: "Courte légende éditoriale affichée sous la photo dans l'article.",
+    }),
+  ],
+  preview: {
+    select: { title: "caption", subtitle: "alt", media: "asset" },
+    prepare: ({ title, subtitle, media }) => ({
+      title: title || subtitle || "Image d'illustration",
+      subtitle: title && subtitle ? subtitle : "Illustration dans le corps",
+      media,
+    }),
+  },
+});
+
 /** Corps de texte riche : paragraphes, titres, listes, liens + blocs spécialisés. */
 export const corps = defineType({
   name: "corps",
@@ -115,6 +144,7 @@ export const corps = defineType({
         ],
       },
     }),
+    illustration,
     steps,
     tableau,
     callout,

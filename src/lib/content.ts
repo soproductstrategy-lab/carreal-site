@@ -40,15 +40,33 @@ const orderBySlugs = <T extends { slug: string }>(items: T[]) => items;
 
 /* ---------- Prestations ---------- */
 
-type RawImg = { src?: string; alt?: string; width?: number; height?: number } | null;
+type RawImg = { src?: string; alt?: string; caption?: string; width?: number; height?: number } | null;
 const img = (i: RawImg, fallbackAlt: string): Img | undefined =>
-  i?.src ? { src: i.src, alt: i.alt || fallbackAlt, width: i.width ?? 1600, height: i.height ?? 1200 } : undefined;
+  i?.src
+    ? {
+        src: i.src,
+        alt: i.alt || fallbackAlt,
+        caption: i.caption || undefined,
+        width: i.width ?? 1600,
+        height: i.height ?? 1200,
+      }
+    : undefined;
+
+const BODY_PROJECTION = `"body": body[]{
+    ...,
+    _type == "illustration" => {
+      ...,
+      "src": asset->url,
+      "width": asset->metadata.dimensions.width,
+      "height": asset->metadata.dimensions.height
+    }
+  }`;
 
 type RawService = Omit<Service, "body" | "image"> & { body: PortableText; image: RawImg };
 const SERVICES_Q = `*[_type == "service" && defined(slug.current)] | order(order asc){
   "slug": slug.current, name, short, h1, title, metaDescription, lead, pattern, spec, format, formatNote, priceRange,
-  body, "faq": coalesce(faq[]{q, a}, []), "related": coalesce(related[]->slug.current, []),
-  "image": image{ "src": asset->url, alt, "width": asset->metadata.dimensions.width, "height": asset->metadata.dimensions.height }
+  ${BODY_PROJECTION}, "faq": coalesce(faq[]{q, a}, []), "related": coalesce(related[]->slug.current, []),
+  "image": image{ "src": asset->url, alt, caption, "width": asset->metadata.dimensions.width, "height": asset->metadata.dimensions.height }
 }`;
 
 export async function getServices(): Promise<Service[]> {
@@ -84,7 +102,7 @@ export async function getService(slug: string) {
 type RawZone = Omit<Zone, "body" | "map"> & { body: PortableText };
 const ZONES_Q = `*[_type == "zone" && defined(slug.current)] | order(order asc){
   "slug": slug.current, name, h1, title, metaDescription, lead, "communes": coalesce(communes, []),
-  "postalCodes": coalesce(postalCodes, []), travel, body, "faq": coalesce(faq[]{q, a}, []), wikipedia
+  "postalCodes": coalesce(postalCodes, []), travel, ${BODY_PROJECTION}, "faq": coalesce(faq[]{q, a}, []), wikipedia
 }`;
 
 export async function getZones(): Promise<Zone[]> {
@@ -117,7 +135,7 @@ type RawRealisation = Omit<Realisation, "body" | "images"> & {
 };
 const REALISATIONS_Q = `*[_type == "realisation" && defined(slug.current)] | order(year desc, _createdAt desc){
   "slug": slug.current, title, commune, "zone": zone->slug.current, "services": coalesce(services[]->slug.current, []),
-  year, room, material, format, layout, joint, surface, duration, pattern, summary, body, demo,
+  year, room, material, format, layout, joint, surface, duration, pattern, summary, ${BODY_PROJECTION}, demo,
   "images": photos[]{ "src": asset->url, alt, "width": asset->metadata.dimensions.width, "height": asset->metadata.dimensions.height }
 }`;
 
@@ -158,8 +176,9 @@ export async function getRealisation(slug: string) {
 type RawGuide = Omit<Guide, "body" | "image"> & { body: PortableText; image: RawImg };
 const GUIDES_Q = `*[_type == "guide" && defined(slug.current)] | order(updated desc){
   "slug": slug.current, title, h1, metaDescription, lead, category, published, updated, readingMinutes, pattern,
-  body, "faq": coalesce(faq[]{q, a}, []), "relatedServices": coalesce(relatedServices[]->slug.current, []),
-  "image": image{ "src": asset->url, alt, "width": asset->metadata.dimensions.width, "height": asset->metadata.dimensions.height }
+  ${BODY_PROJECTION},
+  "faq": coalesce(faq[]{q, a}, []), "relatedServices": coalesce(relatedServices[]->slug.current, []),
+  "image": image{ "src": asset->url, alt, caption, "width": asset->metadata.dimensions.width, "height": asset->metadata.dimensions.height }
 }`;
 
 export async function getGuides(): Promise<Guide[]> {

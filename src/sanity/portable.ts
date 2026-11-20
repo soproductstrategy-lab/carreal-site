@@ -119,6 +119,15 @@ export function portableToBlocks(pt: PortableText | null | undefined): Block[] {
       out.push({ type: "table", caption: (o.caption as string) || undefined, head: (o.head as string[]) ?? [], rows: ((o.rows as { cells?: string[] }[]) ?? []).map((r) => r.cells ?? []) });
     else if (o._type === "callout") out.push({ type: "callout", title: (o.title as string) || undefined, text: (o.text as string) ?? "", tone: (o.tone as "info" | "warn") ?? "info" });
     else if (o._type === "spec") out.push({ type: "spec", items: ((o.items as { label?: string; value?: string }[]) ?? []).map((i) => ({ label: i.label ?? "", value: i.value ?? "" })) });
+    else if (o._type === "illustration" && typeof o.src === "string" && o.src)
+      out.push({
+        type: "image",
+        src: o.src,
+        alt: String(o.alt ?? ""),
+        caption: typeof o.caption === "string" && o.caption.trim() ? o.caption.trim() : undefined,
+        width: typeof o.width === "number" && o.width > 0 ? o.width : 1376,
+        height: typeof o.height === "number" && o.height > 0 ? o.height : 768,
+      });
   }
   return out;
 }

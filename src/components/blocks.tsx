@@ -191,8 +191,28 @@ export function GuideList({ guides }: { guides: Guide[] }) {
         <li key={g.slug} className="col-span-12 flex">
           <Link
             href={`/conseils/${g.slug}/`}
-            className="group cabochon grid flex-1 gap-2 bg-blanc px-6 py-5 hover:bg-white md:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_auto] md:items-baseline md:gap-8"
+            className={`group cabochon grid flex-1 items-center gap-4 bg-blanc px-6 py-5 hover:bg-white md:gap-7 ${
+              g.image
+                ? "md:grid-cols-[11rem_minmax(0,1fr)_minmax(0,1.25fr)_auto]"
+                : "md:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_auto]"
+            }`}
           >
+            {g.image && (
+              <span className="block aspect-[4/3] w-full overflow-hidden bg-alu-2 md:w-44">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={imgSrc(g.image.src, 480)}
+                  srcSet={imgSrcSet(g.image.src, [320, 480, 800])}
+                  sizes="(min-width: 768px) 176px, 92vw"
+                  alt={g.image.alt}
+                  width={g.image.width}
+                  height={g.image.height}
+                  loading="lazy"
+                  decoding="async"
+                  className="size-full object-cover transition-transform duration-300 ease-out group-hover:scale-[1.03]"
+                />
+              </span>
+            )}
             <span>
               <span className="t-etiquette block text-rouge-fonce">{g.category}</span>
               <span className="mt-1 block text-[1.25rem] leading-snug font-[700] decoration-2 underline-offset-4 group-hover:underline">{fr(g.title)}</span>

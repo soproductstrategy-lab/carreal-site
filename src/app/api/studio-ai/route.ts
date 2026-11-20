@@ -1,6 +1,15 @@
 import { type NextRequest, NextResponse } from "next/server";
 import type { Block, PatternName } from "@/content/types";
 import {
+  buildHarnessedImagePrompt,
+  DEFAULT_GEMINI_IMAGE_MODEL,
+  recommendArticleImageCount,
+  sanitizeSeoFilename,
+  type ImageAspectRatio,
+  type ImageSlotRole,
+  type ImageStyleType,
+} from "@/lib/carreal-image-harness";
+import {
   extractLivePreviewFromPartialJson,
   getCarrealSeoContext,
   sanitizeInternalLinks,
@@ -22,6 +31,7 @@ type AiAction =
   | "suggest-guide-ideas"
   | "generate-realisation"
   | "generate-guide"
+  | "plan-article-images"
   | "optimize-seo"
   | "generate-alt-texts"
   | "improve-text";
@@ -29,6 +39,7 @@ type AiAction =
 type GuideAngle = "auto" | "prix" | "etapes" | "comparatif" | "probleme";
 type LocalFocus = "annecy" | "lac" | "aravis" | "haute-savoie";
 type IdeaTheme = "all" | "prix" | "salle-de-bain" | "terrasse" | "problemes" | "tendances";
+type ImageScope = "auto" | "cover-only" | "body-only" | "1" | "2" | "3";
 
 type RequestBody = {
   action: AiAction;
@@ -38,6 +49,7 @@ type RequestBody = {
   angle?: GuideAngle;
   localFocus?: LocalFocus;
   theme?: IdeaTheme;
+  imageScope?: ImageScope;
   stream?: boolean;
   document?: Record<string, unknown>;
   photoUrls?: { key?: string; url: string }[];
@@ -77,6 +89,29 @@ function portableSummary(pt: unknown): string {
     })
     .filter(Boolean)
     .join("\n");
+}
+
+function inspectPortableStructure(pt: unknown): { headings: string[]; wordCount: number; existingInlineCount: number } {
+  if (!Array.isArray(pt)) return { headings: [], wordCount: 0, existingInlineCount: 0 };
+  const headings: string[] = [];
+  let wordCount = 0;
+  let existingInlineCount = 0;
+  for (const node of pt) {
+    if (!node || typeof node !== "object") continue;
+    const o = node as Record<string, unknown>;
+    if (o._type === "illustration") {
+      existingInlineCount++;
+      continue;
+    }
+    if (o._type === "block" && Array.isArray(o.children)) {
+      const text = (o.children as { text?: string }[]).map((c) => c.text ?? "").join("").trim();
+      if (text) {
+        wordCount += text.split(/\s+/).length;
+        if (o.style === "h2") headings.push(text);
+      }
+    }
+  }
+  return { headings, wordCount, existingInlineCount };
 }
 
 type RawSection = {
@@ -536,6 +571,261 @@ Checklist qualité OBLIGATOIRE :
     };
   }
 
+  /* ---------- 1b. Planifier les illustrations SEO (couverture + corps) d'un article nouveau ou existant ---------- */
+  if (action === "plan-article-images") {
+    const scope: ImageScope = payload.imageScope ?? "auto";
+    const docTitle = stripMarkdownPlainText(String(doc.title ?? doc.h1 ?? notes ?? ""));
+    const docH1 = stripMarkdownPlainText(String(doc.h1 ?? doc.title ?? ""));
+    const docLead = stripMarkdownPlainText(String(doc.lead ?? ""));
+    const docCategory = String(doc.category ?? "Conseils techniques");
+    const docSlug = String((doc.slug as { current?: string } | undefined)?.current ?? slugify(docTitle || "carrelage-annecy"));
+    const bodyStats = inspectPortableStructure(doc.body);
+    const totalWords = bodyStats.wordCount + (docLead ? docLead.split(/\s+/).length : 0);
+    const hasCover = Boolean((doc.image as { asset?: { _ref?: string } } | undefined)?.asset?._ref);
+
+    if (!docTitle && !docLead && totalWords < 15) {
+      throw Object.assign(
+        new Error("Rédigez d'abord un titre ou le texte de l'article avant de planifier ses illustrations SEO."),
+        { status: 400 },
+      );
+    }
+
+    const recommendation = recommendArticleImageCount({
+      wordCount: totalWords,
+      h2Count: bodyStats.headings.length,
+      angle,
+      hasCover,
+      existingInlineCount: bodyStats.existingInlineCount,
+    });
+
+    // Détermine les emplacements exacts à planifier selon le choix de l'utilisateur
+    let planHero = true;
+    let bodyCount = Math.max(0, recommendation.recommendedTotal - 1);
+
+    if (scope === "cover-only" || scope === "1") {
+      planHero = true;
+      bodyCount = 0;
+    } else if (scope === "body-only") {
+      planHero = false;
+      bodyCount = bodyStats.headings.length >= 3 ? 2 : 1;
+    } else if (scope === "2") {
+      planHero = true;
+      bodyCount = 1;
+    } else if (scope === "3") {
+      planHero = true;
+      bodyCount = 2;
+    } else {
+      // auto : si l'article existant a déjà une couverture mais pas d'images dans le corps,
+      // on propose de compléter le corps en priorité (ou de proposer 1 couverture + corps si rien n'existe).
+      if (hasCover && bodyStats.existingInlineCount === 0 && recommendation.recommendedTotal >= 2) {
+        planHero = false;
+        bodyCount = recommendation.recommendedTotal - 1;
+      } else {
+        planHero = true;
+        bodyCount = Math.max(0, recommendation.recommendedTotal - 1);
+      }
+    }
+
+    // Ne demande jamais plus d'images corps qu'il n'y a de sections (sauf si 0 H2 → on autorise 1 image de corps)
+    if (bodyStats.headings.length > 0) {
+      bodyCount = Math.min(bodyCount, Math.min(2, bodyStats.headings.length));
+    } else {
+      bodyCount = Math.min(bodyCount, 1);
+    }
+
+    const expectedSlots = (planHero ? 1 : 0) + bodyCount;
+    const roleSequence: { role: ImageSlotRole; aspectRatio: ImageAspectRatio }[] = [
+      ...(planHero ? [{ role: "hero" as const, aspectRatio: "4:3" as const }] : []),
+      ...Array.from({ length: bodyCount }, () => ({ role: "body" as const, aspectRatio: "16:9" as const })),
+    ];
+
+    type RawPlannedSlot = {
+      role: ImageSlotRole;
+      afterHeading?: string;
+      styleType: ImageStyleType;
+      seoFilename: string;
+      alt: string;
+      caption: string;
+      sceneDescriptionEn: string;
+      editorialRationale: string;
+    };
+    type Out = {
+      slots: RawPlannedSlot[];
+    };
+
+    const schema = {
+      type: "object",
+      properties: {
+        slots: {
+          type: "array",
+          minItems: expectedSlots,
+          maxItems: expectedSlots,
+          description: `Exactement ${expectedSlots} emplacement(s) photo SEO complémentaires et visuellement variés.`,
+          items: {
+            type: "object",
+            properties: {
+              role: { type: "string", enum: ["hero", "body"] },
+              afterHeading: {
+                type: "string",
+                description:
+                  "Pour role='body' : le titre H2 EXACT de la section après laquelle insérer l'image (copié tel quel de la liste fournie). Pour role='hero' : chaîne vide.",
+              },
+              styleType: {
+                type: "string",
+                enum: ["architectural", "detail", "material", "exterior"],
+                description: "architectural (vue pièce sobre), detail (gros plan pose/joints/finitions), material (échantillons matériaux/colle), exterior (terrasse/balcon alpin).",
+              },
+              seoFilename: {
+                type: "string",
+                description: "Nom de fichier SEO descriptif en français en minuscules kebab-case avec .jpg (ex. pose-carrelage-plancher-chauffant-annecy-sejour.jpg).",
+              },
+              alt: {
+                type: "string",
+                description: "Attribut alt SEO en français sobre et précis (85 à 135 caractères), sans 'Photo de' ni 'Image de', décrivant concrètement le matériau, la pose et le rendu.",
+              },
+              caption: {
+                type: "string",
+                description: "Légende éditoriale courte et utile sous l'image (55 à 115 caractères) apportant un repère technique cohérent avec l'article.",
+              },
+              sceneDescriptionEn: {
+                type: "string",
+                description:
+                  "Detailed photographic scene description in English (2-4 concrete sentences) describing the exact tiling material, tile size, grout line, room/terrace architectural geometry, and light. STRICTLY NO people, NO hands, NO faces, NO text, NO logos, NO recognizable landmarks.",
+              },
+              editorialRationale: {
+                type: "string",
+                description: "1 phrase courte en français expliquant ce que cette image apporte au lecteur et au SEO de cette section.",
+              },
+            },
+            required: ["role", "afterHeading", "styleType", "seoFilename", "alt", "caption", "sceneDescriptionEn", "editorialRationale"],
+          },
+        },
+      },
+      required: ["slots"],
+    };
+
+    const rolePlanDescription = roleSequence
+      .map((r, i) =>
+        r.role === "hero"
+          ? `${i + 1}. role="hero" (Couverture / miniature Google Discover 4:3, 1200×896) — vue principale représentative de tout l'article.`
+          : `${i + 1}. role="body" (Illustration dans le corps de l'article 16:9, 1376×768) — angle visuel DIFFÉRENT de la couverture (ex. gros plan technique, détail de joint, comparaison de matériaux ou finition précise).`,
+      )
+      .join("\n");
+
+    const headingsList = bodyStats.headings.length
+      ? bodyStats.headings.map((h, i) => `${i + 1}. ${h}`).join("\n")
+      : "(Aucune section H2 détectée — placer après le premier paragraphe)";
+
+    const prompt = `Tu es directeur artistique et expert SEO éditorial pour Carreal (artisan carreleur à Annecy / Haute-Savoie).
+Planifie exactement ${expectedSlots} illustration(s) photographique(s) cohérente(s), ultra-crédible(s) et NON IDENTIFIABLE(S) pour cet article :
+
+TITRE : ${docTitle}
+H1 : ${docH1}
+CATÉGORIE : ${docCategory}
+ANCRAGE LOCAL : ${LOCAL_FOCUS_LABEL[localFocus] ?? LOCAL_FOCUS_LABEL.annecy}
+CHAPEAU : ${docLead || "(Non renseigné)"}
+
+SECTIONS H2 EXACTES DE L'ARTICLE :
+${headingsList}
+
+EXTRAIT DU TEXTE :
+${portableSummary(doc.body).slice(0, 2200) || notes || "(Article en préparation)"}
+
+EMPLACEMENTS EXACTS À PRODUIRE (dans cet ordre strict) :
+${rolePlanDescription}
+
+RÈGLES IMPÉRATIVES :
+1. Chaque image doit avoir un angle visuel DISTINCT (par exemple : vue d'ensemble architecturale pour la couverture, puis gros plan sur les joints/profilés/coupes ou comparaison d'échantillons pour les images du corps).
+2. Pour chaque slot role="body", choisis une section H2 différente parmi la liste ci-dessus et recopie son intitulé EXACT dans "afterHeading".
+3. STRICTEMENT NON IDENTIFIABLE dans sceneDescriptionEn : AUCUNE personne, AUCUNE main, AUCUN visage, AUCUN texte/chiffre/logo/marque, AUCUN monument connu d'Annecy, AUCUN panneau de rue. Uniquement de l'architecture résidentielle, de la matière céramique/pierre naturelle, des joints et de la lumière naturelle.
+4. Les champs "alt" et "caption" doivent être en français brut (sans markdown, sans astérisques), naturels et utiles pour Google Images et les lecteurs.
+5. Les noms de fichiers "seoFilename" doivent être descriptifs en français (mots-clés réels de l'article, kebab-case, .jpg).`;
+
+    return {
+      prompt,
+      schema,
+      thinkingLevel: "minimal",
+      buildResponse: (raw, durationMs, model) => {
+        const res = raw as Out;
+        const validHeadings = new Set(bodyStats.headings);
+        const usedHeadings = new Set<string>();
+
+        const slots = (res.slots ?? []).slice(0, expectedSlots).map((slot, idx) => {
+          const expected = roleSequence[idx] ?? { role: "body" as const, aspectRatio: "16:9" as const };
+          const role: ImageSlotRole = expected.role;
+          const aspectRatio: ImageAspectRatio = expected.aspectRatio;
+          const styleType: ImageStyleType = ["architectural", "detail", "material", "exterior"].includes(slot.styleType)
+            ? slot.styleType
+            : role === "hero"
+              ? "architectural"
+              : "detail";
+
+          let afterHeading = "";
+          if (role === "body") {
+            const candidate = stripMarkdownPlainText(slot.afterHeading ?? "");
+            if (candidate && validHeadings.has(candidate) && !usedHeadings.has(candidate)) {
+              afterHeading = candidate;
+            } else {
+              // Choisit un H2 pertinent non encore utilisé (préférence milieu de l'article)
+              const preferredIdx = bodyStats.headings.length >= 3 && idx === (planHero ? 1 : 0) ? 0 : Math.min(idx, bodyStats.headings.length - 1);
+              const fallback =
+                bodyStats.headings.find((h, i) => i >= preferredIdx && !usedHeadings.has(h)) ??
+                bodyStats.headings.find((h) => !usedHeadings.has(h)) ??
+                bodyStats.headings[0] ??
+                "";
+              afterHeading = fallback;
+            }
+            if (afterHeading) usedHeadings.add(afterHeading);
+          }
+
+          const seoFilename = sanitizeSeoFilename(slot.seoFilename, `${docSlug}-${role === "hero" ? "couverture" : `illustration-${idx + 1}`}`);
+          const alt = stripMarkdownPlainText(slot.alt || `${docTitle} — carrelage artisanal en Haute-Savoie`).slice(0, 145);
+          const caption = stripMarkdownPlainText(slot.caption || "").slice(0, 140);
+          const sceneDescriptionEn = (slot.sceneDescriptionEn || "").trim();
+          const harnessedPrompt = buildHarnessedImagePrompt({
+            sceneDescriptionEn,
+            styleType,
+            role,
+            aspectRatio,
+            localFocus,
+          });
+
+          return {
+            id: `slot-${idx + 1}-${role}`,
+            role,
+            aspectRatio,
+            width: aspectRatio === "4:3" ? 1200 : 1376,
+            height: aspectRatio === "4:3" ? 896 : 768,
+            afterHeading: afterHeading || undefined,
+            styleType,
+            seoFilename,
+            alt,
+            caption,
+            sceneDescriptionEn,
+            harnessedPrompt,
+            editorialRationale: stripMarkdownPlainText(slot.editorialRationale || ""),
+          };
+        });
+
+        return {
+          summary: `Plan visuel SEO prêt en ${(durationMs / 1000).toFixed(1)} s (${slots.length} visuel${slots.length > 1 ? "s" : ""} planifié${slots.length > 1 ? "s" : ""}, recommandation SEO : ${recommendation.recommendedTotal} image${recommendation.recommendedTotal > 1 ? "s" : ""}).`,
+          meta: { durationMs, model },
+          imagePlan: {
+            recommendedTotal: recommendation.recommendedTotal,
+            recommendedNew: recommendation.recommendedNew,
+            recommendationReason: recommendation.reason,
+            existingCover: hasCover,
+            existingInlineCount: bodyStats.existingInlineCount,
+            wordCount: totalWords,
+            h2Count: bodyStats.headings.length,
+            imageModel: DEFAULT_GEMINI_IMAGE_MODEL,
+            slots,
+          },
+        };
+      },
+    };
+  }
+
   /* ---------- 2. Générer une fiche chantier complète (notes + photos Vision) ---------- */
   if (action === "generate-realisation") {
     const ctx = await getCarrealSeoContext();
@@ -945,6 +1235,7 @@ export async function GET() {
   return NextResponse.json({
     configured: isGeminiConfigured(),
     model: DEFAULT_GEMINI_MODEL,
+    imageModel: DEFAULT_GEMINI_IMAGE_MODEL,
     streaming: true,
   });
 }
@@ -996,7 +1287,12 @@ export async function POST(req: NextRequest) {
         try {
           controller.enqueue(
             sse("status", {
-              stage: payload.action === "suggest-guide-ideas" ? "Analyse de vos articles et recherches Annecy…" : "Connexion à Gemini…",
+              stage:
+                payload.action === "suggest-guide-ideas"
+                  ? "Analyse de vos articles et recherches Annecy…"
+                  : payload.action === "plan-article-images"
+                    ? "Analyse de l'article et calcul des visuels SEO recommandés…"
+                    : "Connexion à Gemini…",
               elapsedMs: 0,
               model: DEFAULT_GEMINI_MODEL,
             }),

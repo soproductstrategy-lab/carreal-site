@@ -78,7 +78,17 @@ export const service = defineType({
   fields: [
     defineField({ name: "name", title: "Nom complet", type: "string", group: "content", validation: (r) => r.required() }),
     defineField({ name: "short", title: "Nom court (menu)", type: "string", group: "content", validation: (r) => r.required() }),
-    defineField({ name: "image", title: "Photo principale", type: "image", options: { hotspot: true }, group: "content", fields: [defineField({ name: "alt", title: "Description de la photo", type: "string" })] }),
+    defineField({
+      name: "image",
+      title: "Photo principale (couverture / miniature)",
+      type: "image",
+      options: { hotspot: true },
+      group: "content",
+      fields: [
+        defineField({ name: "alt", title: "Description de la photo (SEO)", type: "string" }),
+        defineField({ name: "caption", title: "Légende affichée sous l'image", type: "string" }),
+      ],
+    }),
     defineField({ name: "h1", title: "Titre de la page (H1)", type: "string", group: "content" }),
     defineField({ name: "lead", title: "Réponse directe (introduction)", type: "text", rows: 4, group: "content", description: "2-3 phrases : quoi, où, comment. C'est ce que citent Google et les IA." }),
     defineField({ name: "spec", title: "Repères techniques", type: "string", group: "content", description: "Séparés par « · »" }),
@@ -130,7 +140,17 @@ export const guide = defineType({
     defineField({ name: "h1", title: "Titre de la page (H1)", type: "string", group: "content" }),
     defineField({ name: "category", title: "Catégorie", type: "string", group: "content", options: { list: ["Prix", "Conseils techniques", "Problèmes & réparations"], layout: "radio" }, initialValue: "Conseils techniques" }),
     defineField({ name: "lead", title: "Réponse directe", type: "text", rows: 4, group: "content", description: "La réponse à la question en 2-3 phrases chiffrées." }),
-    defineField({ name: "image", title: "Photo principale", type: "image", options: { hotspot: true }, group: "content", fields: [defineField({ name: "alt", title: "Description de la photo", type: "string" })] }),
+    defineField({
+      name: "image",
+      title: "Photo principale (couverture / miniature)",
+      type: "image",
+      options: { hotspot: true },
+      group: "content",
+      fields: [
+        defineField({ name: "alt", title: "Description de la photo (SEO)", type: "string" }),
+        defineField({ name: "caption", title: "Légende affichée sous l'image", type: "string" }),
+      ],
+    }),
     defineField({ name: "body", title: "Contenu", type: "corps", group: "content" }),
     faq,
     defineField({ name: "relatedServices", title: "Prestations liées", type: "array", of: [{ type: "reference", to: [{ type: "service" }] }], group: "content" }),

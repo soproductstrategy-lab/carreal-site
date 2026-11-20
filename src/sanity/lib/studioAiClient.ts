@@ -1,6 +1,59 @@
 export type GuideAngle = "auto" | "prix" | "etapes" | "comparatif" | "probleme";
 export type LocalFocus = "annecy" | "lac" | "aravis" | "haute-savoie";
 export type IdeaTheme = "all" | "prix" | "salle-de-bain" | "terrasse" | "problemes" | "tendances";
+export type ArticleImagePreference = "none" | "auto" | "1" | "2" | "3";
+export type ExistingImageScope = "auto" | "cover-only" | "body-only" | "2" | "3";
+
+export type ImagePlanSlot = {
+  id: string;
+  role: "hero" | "body";
+  aspectRatio: "4:3" | "16:9";
+  width: number;
+  height: number;
+  afterHeading?: string;
+  styleType: "architectural" | "detail" | "material" | "exterior";
+  seoFilename: string;
+  alt: string;
+  caption: string;
+  sceneDescriptionEn: string;
+  harnessedPrompt: string;
+  editorialRationale: string;
+};
+
+export type ArticleImagePlan = {
+  recommendedTotal: 1 | 2 | 3;
+  recommendedNew: number;
+  recommendationReason: string;
+  existingCover: boolean;
+  existingInlineCount: number;
+  wordCount: number;
+  h2Count: number;
+  imageModel: string;
+  slots: ImagePlanSlot[];
+};
+
+export type GeneratedSlotImage = {
+  dataUrl: string;
+  base64?: string;
+  file?: File;
+  mimeType: string;
+  width: number;
+  height: number;
+  seoFilename: string;
+  model?: string;
+  durationMs?: number;
+  source: "ai" | "upload";
+};
+
+export type SlotImageState = {
+  slot: ImagePlanSlot;
+  status: "planned" | "generating" | "ready" | "error";
+  image?: GeneratedSlotImage;
+  error?: string;
+  errorCode?: string;
+  helpUrl?: string;
+  included: boolean;
+};
 
 export type GuideIdea = {
   title: string;
@@ -39,6 +92,7 @@ export type AiProposal = {
   patch?: Record<string, unknown>;
   photoAlts?: { key?: string; alt: string }[];
   ideas?: GuideIdea[];
+  imagePlan?: ArticleImagePlan;
   meta?: { durationMs: number; model: string };
   preview?: {
     title?: string;
@@ -186,4 +240,108 @@ export async function streamStudioAi(
   if (streamError) throw new Error(streamError);
   if (!finalProposal) throw new Error("Le flux Gemini s'est terminé sans résultat complet.");
   return finalProposal;
+}
+
+export class StudioImageApiError extends Error {
+  code?: string;
+  helpUrl?: string;
+  status: number;
+
+  constructor(message: string, opts: { code?: string; helpUrl?: string; status: number }) {
+    super(message);
+    this.name = "StudioImageApiError";
+    this.code = opts.code;
+    this.helpUrl = opts.helpUrl;
+    this.status = opts.status;
+  }
+}
+
+/**
+ * Génère une image SEO via /api/studio-ai/image/ (Gemini Nano Banana 2.1 + harness Carreal).
+ */
+export async function generateArticleSlotImage(
+  slot: ImagePlanSlot,
+  opts: { localFocus?: LocalFocus; signal?: AbortSignal } = {},
+): Promise<GeneratedSlotImage> {
+  const res = await fetch("/api/studio-ai/image/", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sceneDescriptionEn: slot.sceneDescriptionEn,
+      harnessedPrompt: slot.harnessedPrompt,
+      styleType: slot.styleType,
+      role: slot.role,
+      aspectRatio: slot.aspectRatio,
+      localFocus: opts.localFocus ?? "annecy",
+      seoFilename: slot.seoFilename,
+      alt: slot.alt,
+      caption: slot.caption,
+      afterHeading: slot.afterHeading,
+    }),
+    signal: opts.signal,
+  });
+
+  const data = (await res.json().catch(() => ({}))) as {
+    error?: string;
+    code?: string;
+    helpUrl?: string;
+    dataUrl?: string;
+    base64?: string;
+    mimeType?: string;
+    width?: number;
+    height?: number;
+    seoFilename?: string;
+    model?: string;
+    durationMs?: number;
+  };
+
+  if (!res.ok || !data.dataUrl || !data.base64) {
+    throw new StudioImageApiError(data.error || "Impossible de générer cette image.", {
+      code: data.code,
+      helpUrl: data.helpUrl,
+      status: res.status,
+    });
+  }
+
+  return {
+    dataUrl: data.dataUrl,
+    base64: data.base64,
+    mimeType: data.mimeType || "image/jpeg",
+    width: data.width || slot.width,
+    height: data.height || slot.height,
+    seoFilename: data.seoFilename || slot.seoFilename,
+    model: data.model,
+    durationMs: data.durationMs,
+    source: "ai",
+  };
+}
+
+/**
+ * Convertit une image base64 générée en Blob prêt pour `client.assets.upload("image", blob, { filename })`.
+ */
+export function base64ToBlob(base64: string, mimeType = "image/jpeg"): Blob {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return new Blob([bytes], { type: mimeType });
+}
+
+/**
+ * Lit un fichier photo importé par l'artisan pour prévisualisation instantanée avant upload Sanity.
+ */
+export function readLocalImageFile(file: File): Promise<{ dataUrl: string; width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Impossible de lire le fichier photo."));
+    reader.onload = () => {
+      const dataUrl = String(reader.result ?? "");
+      const img = new Image();
+      img.onload = () => resolve({ dataUrl, width: img.naturalWidth || 1200, height: img.naturalHeight || 896 });
+      img.onerror = () => resolve({ dataUrl, width: 1200, height: 896 });
+      img.src = dataUrl;
+    };
+    reader.readAsDataURL(file);
+  });
 }

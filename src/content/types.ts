@@ -12,11 +12,12 @@ export type Block =
   | { type: "steps"; items: { title: string; text: string }[] }
   | { type: "table"; caption?: string; head: string[]; rows: string[][] }
   | { type: "callout"; title?: string; text: string; tone?: "info" | "warn" }
-  | { type: "spec"; items: { label: string; value: string }[] };
+  | { type: "spec"; items: { label: string; value: string }[] }
+  | { type: "image"; src: string; alt: string; caption?: string; width: number; height: number };
 
 export type Faq = { q: string; a: string };
 
-export type Img = { src: string; alt: string; width: number; height: number };
+export type Img = { src: string; alt: string; width: number; height: number; caption?: string };
 
 export type PatternName = "droit" | "decale" | "chevron" | "batons" | "opus" | "mosaique" | "grand";
 
