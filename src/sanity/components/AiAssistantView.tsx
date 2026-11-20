@@ -286,6 +286,32 @@ const IDEA_THEMES: { value: IdeaTheme; label: string }[] = [
   { value: "tendances", label: "📐 Grand format" },
 ];
 
+function mergePatchForPreview(
+  baseDoc: SanityDocument | null,
+  patchObj: Record<string, unknown> | undefined,
+  schemaName: string,
+): SanityDocument {
+  const merged: Record<string, unknown> = {
+    _id: baseDoc?._id ?? "drafts.preview",
+    _type: baseDoc?._type ?? schemaName,
+    _createdAt: baseDoc?._createdAt ?? "",
+    _updatedAt: baseDoc?._updatedAt ?? "",
+    _rev: baseDoc?._rev ?? "",
+    ...(baseDoc ?? {}),
+  };
+  if (!patchObj) return merged as SanityDocument;
+  for (const [k, v] of Object.entries(patchObj)) {
+    if (k.includes(".")) {
+      const [root, child] = k.split(".");
+      const prev = merged[root] && typeof merged[root] === "object" ? (merged[root] as Record<string, unknown>) : {};
+      merged[root] = { ...prev, [child]: v };
+    } else {
+      merged[k] = v;
+    }
+  }
+  return merged as SanityDocument;
+}
+
 /**
  * Onglet « ✨ Assistant IA » intégré dans chaque document Sanity Studio.
  * Streaming temps réel SSE + cerveau SEO local carreleur (anti-cannibalisation, maillage interne vérifié,
@@ -294,7 +320,7 @@ const IDEA_THEMES: { value: IdeaTheme; label: string }[] = [
 export const AiAssistantView: UserViewComponent = ({ document, documentId, schemaType }) => {
   const displayed = (document.displayed ?? document.draft ?? document.published) as SanityDocument | null;
   const cleanId = documentId.replace(/^drafts\./, "");
-  const { patch } = useDocumentOperation(cleanId, schemaType.name);
+  const { patch, commit } = useDocumentOperation(cleanId, schemaType.name);
 
   const [initialBrief] = useState(() => (schemaType.name === "guide" ? consumePendingGuideBrief() : null));
   const [status, setStatus] = useState<{ loading: boolean; configured: boolean; model?: string; streaming?: boolean }>({
@@ -312,6 +338,7 @@ export const AiAssistantView: UserViewComponent = ({ document, documentId, schem
   const [error, setError] = useState<string | null>(null);
   const [appliedMsg, setAppliedMsg] = useState<string | null>(null);
   const [proposal, setProposal] = useState<AiProposal | null>(null);
+  const [appliedDoc, setAppliedDoc] = useState<SanityDocument | null>(null);
   const [applying, setApplying] = useState(false);
 
   const abortRef = useRef<AbortController | null>(null);
@@ -349,9 +376,26 @@ export const AiAssistantView: UserViewComponent = ({ document, documentId, schem
   }, []);
 
   const photos = useMemo(() => extractPhotoRefs(displayed), [displayed]);
-  const seo = useMemo(() => getSeoSnapshot(displayed), [displayed]);
   const missingAlts = photos.filter((p) => !p.alt?.trim()).length;
-  const seoAudit = useMemo(() => evaluateSeoScore(displayed, schemaType.name, photos.length, missingAlts), [displayed, schemaType.name, photos.length, missingAlts]);
+
+  // Document effectif pour l'aperçu Google & le score SEO/GEO :
+  // - si une proposition IA est prête, on prévisualise immédiatement son impact,
+  // - sinon, on prend le brouillon Sanity (ou le snapshot optimiste juste après clic sur Appliquer).
+  const baseForAudit = displayed && (displayed.title || displayed.lead || displayed.summary || displayed.seo) ? displayed : appliedDoc ?? displayed;
+  const effectiveDoc = useMemo(
+    () => (proposal?.patch ? mergePatchForPreview(baseForAudit, proposal.patch, schemaType.name) : baseForAudit),
+    [baseForAudit, proposal?.patch, schemaType.name],
+  );
+  const effectiveMissingAlts = proposal?.photoAlts?.length ? Math.max(0, missingAlts - proposal.photoAlts.length) : missingAlts;
+  const seo = useMemo(() => getSeoSnapshot(effectiveDoc), [effectiveDoc]);
+  const seoAudit = useMemo(
+    () => evaluateSeoScore(effectiveDoc, schemaType.name, photos.length, effectiveMissingAlts),
+    [effectiveDoc, schemaType.name, photos.length, effectiveMissingAlts],
+  );
+  const currentAudit = useMemo(
+    () => evaluateSeoScore(baseForAudit, schemaType.name, photos.length, missingAlts),
+    [baseForAudit, schemaType.name, photos.length, missingAlts],
+  );
 
   async function runAction(
     action: string,
@@ -456,7 +500,11 @@ export const AiAssistantView: UserViewComponent = ({ document, documentId, schem
 
       if (Object.keys(setObj).length > 0) {
         patch.execute([{ set: setObj }]);
-        setAppliedMsg("Brouillon mis à jour par Gemini ! Relisez dans « Éditer », vérifiez dans « 👁 Aperçu », puis cliquez sur « Publier ».");
+        if (!commit.disabled) {
+          commit.execute();
+        }
+        setAppliedDoc(mergePatchForPreview(displayed, setObj, schemaType.name));
+        setAppliedMsg("Brouillon enregistré dans Sanity ! Relisez dans « Éditer », vérifiez dans « 👁 Aperçu », puis cliquez sur « Publier ».");
         setProposal(null);
       }
     } catch (e) {
@@ -927,14 +975,37 @@ export const AiAssistantView: UserViewComponent = ({ document, documentId, schem
                 )}
               </div>
             )}
+
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginTop: 14 }}>
+              <span style={{ fontSize: 12.5, color: "#166534", fontWeight: 600 }}>
+                👇 L&apos;aperçu Google et le score SEO ci-dessous simulent déjà cette proposition.
+              </span>
+              <button
+                type="button"
+                onClick={applyProposal}
+                disabled={applying}
+                style={{ ...btnPrimary, background: "#15803d", borderColor: "#15803d" }}
+              >
+                {applying ? "Application…" : "✅ Appliquer dans le brouillon"}
+              </button>
+            </div>
           </div>
         )}
 
         {/* Aperçu Google (SERP) + Score SEO/GEO temps réel */}
         <div style={cardStyle}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
-            <h3 style={{ margin: 0, fontSize: 15.5, fontWeight: 800 }}>Aperçu dans Google & contrôle SEO / GEO</h3>
-            <StatusPill tone={scoreTone}>Score SEO/GEO : {seoAudit.score} / 100</StatusPill>
+            <div>
+              <h3 style={{ margin: 0, fontSize: 15.5, fontWeight: 800 }}>Aperçu dans Google & contrôle SEO / GEO</h3>
+              {proposal?.patch && (
+                <p style={{ margin: "3px 0 0", fontSize: 12.5, color: "#15803d", fontWeight: 650 }}>
+                  Simulation avec la proposition IA (brouillon actuel : {currentAudit.score}/100 → après application : {seoAudit.score}/100)
+                </p>
+              )}
+            </div>
+            <StatusPill tone={scoreTone}>
+              {proposal?.patch ? `Score projeté : ${seoAudit.score} / 100` : `Score SEO/GEO : ${seoAudit.score} / 100`}
+            </StatusPill>
           </div>
 
           <div style={{ background: "#ffffff", border: "1px solid #dadce0", borderRadius: 4, padding: 14 }}>

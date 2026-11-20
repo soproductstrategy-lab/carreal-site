@@ -4,6 +4,7 @@ import {
   extractLivePreviewFromPartialJson,
   getCarrealSeoContext,
   sanitizeInternalLinks,
+  stripMarkdownPlainText,
   type CarrealSeoContext,
 } from "@/lib/carreal-seo-brain";
 import {
@@ -435,10 +436,10 @@ Catégorie actuelle du document : ${String(doc.category ?? "à déterminer selon
 ${ctx.promptBrief}
 
 Checklist qualité OBLIGATOIRE :
-1. Chapeau (lead) : réponds directement à la question dès la première phrase avec des repères concrets (fourchettes, épaisseurs, délais ou normes DTU 52.2).
-2. Maillage interne naturel : insère 2 à 4 liens markdown vers nos pages prestations, zones ou guides existants (EXCLUSIVEMENT les URLs listées ci-dessus) et termine la dernière section par un renvoi naturel vers [demander un devis gratuit](/devis/).
+1. Chapeau (lead) : réponds directement à la question dès la première phrase avec des repères concrets (fourchettes, épaisseurs, délais ou normes DTU 52.2). IMPORTANT : texte brut SANS aucun lien markdown ni astérisque dans title, h1, lead, metaDescription et faq.
+2. Maillage interne naturel : insère 2 à 4 liens markdown [texte](/prestations/...) ou [texte](/zones-intervention/...) UNIQUEMENT dans les paragraphes/puces des sections (EXCLUSIVEMENT les URLs listées ci-dessus) et termine la dernière section par un renvoi naturel vers [demander un devis gratuit](/devis/).
 3. Blocs riches : inclus au moins un tableau structuré (table) OU des étapes numérotées (steps) (les deux si pertinent), au moins un encadré conseil d'artisan (callout) et 3 à 5 repères techniques (spec).
-4. FAQ (JSON-LD FAQPage) : 3 à 5 questions concrètes posées par les clients en Haute-Savoie, réponses directes sans blabla.
+4. FAQ (JSON-LD FAQPage) : 3 à 5 questions concrètes posées par les clients en Haute-Savoie, réponses directes sans blabla et sans markdown.
 5. Prestations liées : renvoie 2 ou 3 slugs exacts parmi [${[...ctx.validServiceSlugs].join(", ")}] dans relatedServiceSlugs.`;
 
     return {
@@ -448,6 +449,15 @@ Checklist qualité OBLIGATOIRE :
       thinkingLevel: "low",
       buildResponse: (raw, durationMs, model) => {
         const result = raw as Out;
+        const cleanTitle = stripMarkdownPlainText(result.title);
+        const cleanH1 = stripMarkdownPlainText(result.h1);
+        const cleanLead = stripMarkdownPlainText(result.lead);
+        const cleanMeta = stripMarkdownPlainText(result.metaDescription);
+        const cleanFaq = (result.faq ?? []).map((f) => ({
+          q: stripMarkdownPlainText(f.q),
+          a: stripMarkdownPlainText(f.a),
+        }));
+
         const isPriceGuide = result.category === "Prix" || angle === "prix";
         const blocks = buildRichBlocks({
           sections: result.sections ?? [],
@@ -478,16 +488,16 @@ Checklist qualité OBLIGATOIRE :
         }, 0);
 
         const patch: Record<string, unknown> = {
-          title: result.title,
-          h1: result.h1,
-          slug: { _type: "slug", current: slugify(result.title) },
+          title: cleanTitle,
+          h1: cleanH1,
+          slug: { _type: "slug", current: slugify(cleanTitle) },
           category: result.category,
           pattern: safePattern,
           readingMinutes: Math.max(3, Math.min(10, Math.round(result.readingMinutes || 5))),
-          lead: result.lead,
-          metaDescription: result.metaDescription,
+          lead: cleanLead,
+          metaDescription: cleanMeta,
           body: blocksToPortable(blocks),
-          faq: (result.faq ?? []).map((f) => ({ _type: "faqItem", _key: key(), q: f.q, a: f.a })),
+          faq: cleanFaq.map((f) => ({ _type: "faqItem", _key: key(), q: f.q, a: f.a })),
           ...(matchedServices.length
             ? { relatedServices: matchedServices.map((s) => ({ _type: "reference", _ref: `service-${s}`, _key: key() })) }
             : {}),
@@ -500,26 +510,26 @@ Checklist qualité OBLIGATOIRE :
         const hasSpec = blocks.some((b) => b.type === "spec");
 
         return {
-          summary: `Article SEO/GEO généré en ${(durationMs / 1000).toFixed(1)} s (${result.sections.length} sections, ${result.faq.length} FAQ, ${internalLinksCount} liens internes${hasTable ? ", tableau" : ""}${hasSteps ? ", étapes" : ""}).`,
+          summary: `Article SEO/GEO généré en ${(durationMs / 1000).toFixed(1)} s (${result.sections.length} sections, ${cleanFaq.length} FAQ, ${internalLinksCount} liens internes${hasTable ? ", tableau" : ""}${hasSteps ? ", étapes" : ""}).`,
           patch,
           meta: { durationMs, model },
           preview: {
-            title: result.title,
-            h1: result.h1,
+            title: cleanTitle,
+            h1: cleanH1,
             category: result.category,
-            targetKeyword: result.targetKeyword,
+            targetKeyword: stripMarkdownPlainText(result.targetKeyword),
             slug: (patch.slug as { current: string }).current,
-            metaDescription: result.metaDescription,
-            excerpt: result.lead,
-            headings: (result.sections ?? []).map((s) => s.heading).filter(Boolean),
-            faqCount: result.faq.length,
-            faqQuestions: (result.faq ?? []).map((f) => f.q),
+            metaDescription: cleanMeta,
+            excerpt: cleanLead,
+            headings: (result.sections ?? []).map((s) => stripMarkdownPlainText(s.heading ?? "")).filter(Boolean),
+            faqCount: cleanFaq.length,
+            faqQuestions: cleanFaq.map((f) => f.q),
             hasTable,
             hasSteps,
             hasSpec,
             internalLinksCount,
             relatedServices: matchedServices,
-            tips: result.seoNotes ?? [],
+            tips: (result.seoNotes ?? []).map(stripMarkdownPlainText),
           },
         };
       },
@@ -640,45 +650,49 @@ Consignes :
       thinkingLevel: "low",
       buildResponse: (raw, durationMs, model) => {
         const result = raw as Out;
+        const cleanTitle = stripMarkdownPlainText(result.title);
+        const cleanSummary = stripMarkdownPlainText(result.summary);
         const blocks = buildRichBlocks({ sections: result.sections ?? [], allowedHrefs: ctx.allowedHrefs });
         const safePattern: PatternName = VALID_PATTERNS.includes(result.pattern as PatternName) ? (result.pattern as PatternName) : "droit";
         const matchedServices = (result.relatedServiceSlugs ?? []).filter((s) => ctx.validServiceSlugs.has(s)).slice(0, 3);
 
         const patch: Record<string, unknown> = {
-          title: result.title,
-          slug: { _type: "slug", current: slugify(`${result.commune || "annecy"}-${result.title}`) },
-          commune: result.commune || doc.commune || "",
-          room: result.room || doc.room || "",
-          material: result.material || doc.material || "",
-          format: result.format || doc.format || "",
-          layout: result.layout || doc.layout || "",
-          joint: result.joint || doc.joint || "",
-          surface: result.surface || doc.surface || "",
-          duration: result.duration || doc.duration || "",
+          title: cleanTitle,
+          slug: { _type: "slug", current: slugify(`${result.commune || "annecy"}-${cleanTitle}`) },
+          commune: stripMarkdownPlainText(result.commune) || doc.commune || "",
+          room: stripMarkdownPlainText(result.room) || doc.room || "",
+          material: stripMarkdownPlainText(result.material) || doc.material || "",
+          format: stripMarkdownPlainText(result.format) || doc.format || "",
+          layout: stripMarkdownPlainText(result.layout) || doc.layout || "",
+          joint: stripMarkdownPlainText(result.joint) || doc.joint || "",
+          surface: stripMarkdownPlainText(result.surface) || doc.surface || "",
+          duration: stripMarkdownPlainText(result.duration) || doc.duration || "",
           pattern: safePattern,
-          summary: result.summary,
+          summary: cleanSummary,
           body: blocksToPortable(blocks),
           ...(matchedServices.length
             ? { services: matchedServices.map((s) => ({ _type: "reference", _ref: `service-${s}`, _key: key() })) }
             : {}),
         };
 
+        const cleanAlts = (result.photoAlts ?? []).map(stripMarkdownPlainText);
+
         return {
           summary: `Fiche chantier générée en ${(durationMs / 1000).toFixed(1)} s (titre, fiche technique, récit et textes photos).`,
           patch,
           meta: { durationMs, model },
-          photoAlts: (result.photoAlts ?? []).slice(0, photoUrls.length).map((alt, i) => ({
+          photoAlts: cleanAlts.slice(0, photoUrls.length).map((alt, i) => ({
             key: photoUrls[i]?.key,
             alt,
           })),
           preview: {
-            title: result.title,
+            title: cleanTitle,
             slug: (patch.slug as { current: string }).current,
             meta: [result.commune, result.room, result.format, result.surface, result.duration].filter(Boolean).join(" · "),
-            excerpt: result.summary,
-            headings: (result.sections ?? []).map((s) => s.heading).filter(Boolean),
+            excerpt: cleanSummary,
+            headings: (result.sections ?? []).map((s) => stripMarkdownPlainText(s.heading ?? "")).filter(Boolean),
             relatedServices: matchedServices,
-            photoAlts: result.photoAlts ?? [],
+            photoAlts: cleanAlts,
           },
         };
       },
@@ -740,22 +754,25 @@ Consignes :
       thinkingLevel: "minimal",
       buildResponse: (raw, durationMs, model) => {
         const result = raw as Out;
+        const cleanSeoTitle = stripMarkdownPlainText(result.seoTitle);
+        const cleanMetaDesc = stripMarkdownPlainText(result.metaDescription);
+        const cleanLead = stripMarkdownPlainText(result.suggestedLeadOrSummary);
         const patch: Record<string, unknown> = {};
         if (docType === "homePage" || docType === "aboutPage") {
-          patch["seo.title"] = result.seoTitle;
-          patch["seo.description"] = result.metaDescription;
+          patch["seo.title"] = cleanSeoTitle;
+          patch["seo.description"] = cleanMetaDesc;
         } else if (docType === "realisation") {
-          if (!doc.title && result.seoTitle) patch.title = result.seoTitle;
-          if (result.suggestedLeadOrSummary) patch.summary = result.suggestedLeadOrSummary;
+          if (!doc.title && cleanSeoTitle) patch.title = cleanSeoTitle;
+          if (cleanLead) patch.summary = cleanLead;
         } else if (docType === "guide") {
-          patch.title = result.seoTitle;
-          patch.metaDescription = result.metaDescription;
-          if (result.suggestedLeadOrSummary) patch.lead = result.suggestedLeadOrSummary;
+          patch.title = cleanSeoTitle;
+          patch.metaDescription = cleanMetaDesc;
+          if (cleanLead) patch.lead = cleanLead;
         } else {
-          patch.title = result.seoTitle;
-          patch.metaDescription = result.metaDescription;
-          if (result.suggestedLeadOrSummary && (docType === "service" || docType === "zone")) {
-            patch.lead = result.suggestedLeadOrSummary;
+          patch.title = cleanSeoTitle;
+          patch.metaDescription = cleanMetaDesc;
+          if (cleanLead && (docType === "service" || docType === "zone")) {
+            patch.lead = cleanLead;
           }
         }
 
@@ -764,10 +781,10 @@ Consignes :
           patch,
           meta: { durationMs, model },
           preview: {
-            seoTitle: result.seoTitle,
-            metaDescription: result.metaDescription,
-            excerpt: result.suggestedLeadOrSummary,
-            tips: result.tips,
+            seoTitle: cleanSeoTitle,
+            metaDescription: cleanMetaDesc,
+            excerpt: cleanLead,
+            tips: (result.tips ?? []).map(stripMarkdownPlainText),
           },
         };
       },
@@ -901,19 +918,20 @@ ${ctx ? `\n${ctx.promptBrief}` : ""}`;
         const patch: Record<string, unknown> = {
           [bodyField]: blocksToPortable(blocks),
         };
-        if (result.leadOrSummary?.trim()) {
-          if (docType === "realisation") patch.summary = result.leadOrSummary.trim();
-          else if (docType === "guide" || docType === "service" || docType === "zone") patch.lead = result.leadOrSummary.trim();
+        const cleanLead = result.leadOrSummary ? stripMarkdownPlainText(result.leadOrSummary) : "";
+        if (cleanLead) {
+          if (docType === "realisation") patch.summary = cleanLead;
+          else if (docType === "guide" || docType === "service" || docType === "zone") patch.lead = cleanLead;
         }
         return {
-          summary: `${result.changesSummary} (${(durationMs / 1000).toFixed(1)} s)`,
+          summary: `${stripMarkdownPlainText(result.changesSummary)} (${(durationMs / 1000).toFixed(1)} s)`,
           patch,
           meta: { durationMs, model },
           preview: {
-            excerpt: result.leadOrSummary || result.sections?.[0]?.paragraphs?.[0] || "",
-            headings: (result.sections ?? []).map((s) => s.heading).filter(Boolean),
+            excerpt: cleanLead || stripMarkdownPlainText(result.sections?.[0]?.paragraphs?.[0] ?? ""),
+            headings: (result.sections ?? []).map((s) => stripMarkdownPlainText(s.heading ?? "")).filter(Boolean),
             sectionsCount: result.sections?.length ?? 0,
-            changesSummary: result.changesSummary,
+            changesSummary: stripMarkdownPlainText(result.changesSummary),
           },
         };
       },

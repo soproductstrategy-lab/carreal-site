@@ -102,6 +102,21 @@ export async function getCarrealSeoContext(): Promise<CarrealSeoContext> {
 }
 
 /**
+ * Supprime toute syntaxe markdown (**gras**, [lien](/url)) des champs texte brut (title, h1, lead, summary, metaDescription, faq, alt)
+ * pour ne jamais afficher de crochets ou d'astérisques bruts sur le site public.
+ */
+export function stripMarkdownPlainText(text: string): string {
+  if (!text) return "";
+  return text
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/\*\*(.+?)\*\*/g, "$1")
+    .replace(/__(.+?)__/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
  * Vérifie chaque lien markdown [texte](url) généré par l'IA :
  * - normalise le slash final,
  * - conserve uniquement les URLs internes vérifiées dans `allowedHrefs`,
