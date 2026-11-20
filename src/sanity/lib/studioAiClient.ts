@@ -104,7 +104,7 @@ export async function streamStudioAi(
     onProgress?: (p: StreamProgress) => void;
   } = {},
 ): Promise<AiProposal> {
-  const res = await fetch("/api/studio-ai", {
+  const res = await fetch("/api/studio-ai/", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ...body, stream: true }),
@@ -174,12 +174,11 @@ export async function streamStudioAi(
     const { done, value } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
-    let sep = buffer.indexOf("\n\n");
-    while (sep !== -1) {
-      const block = buffer.slice(0, sep).trim();
-      buffer = buffer.slice(sep + 2);
-      if (block) processBlock(block);
-      sep = buffer.indexOf("\n\n");
+    const parts = buffer.split(/\r?\n\r?\n/);
+    buffer = parts.pop() ?? "";
+    for (const part of parts) {
+      const trimmed = part.trim();
+      if (trimmed) processBlock(trimmed);
     }
   }
 

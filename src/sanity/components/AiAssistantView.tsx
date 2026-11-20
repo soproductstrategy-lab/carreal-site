@@ -323,7 +323,7 @@ export const AiAssistantView: UserViewComponent = ({ document, documentId, schem
 
   useEffect(() => {
     let active = true;
-    fetch("/api/studio-ai")
+    fetch("/api/studio-ai/")
       .then((r) => r.json())
       .then((d: { configured?: boolean; model?: string; streaming?: boolean }) => {
         if (!active) return;

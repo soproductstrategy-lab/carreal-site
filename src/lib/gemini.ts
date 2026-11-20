@@ -104,58 +104,73 @@ export async function runStructuredGemini<T>(opts: {
   systemInstruction?: string;
   model?: string;
   thinkingLevel?: GeminiThinkingLevel;
+  signal?: AbortSignal;
 }): Promise<T> {
   const ai = getGeminiClient();
   const model = opts.model || DEFAULT_GEMINI_MODEL;
   const thinkingLevel = resolveThinkingLevel(model, opts.thinkingLevel ?? "low");
   const input = await buildInput(opts.prompt, opts.imageUrls);
 
-  const interaction = await ai.interactions.create({
-    model,
-    system_instruction: opts.systemInstruction ?? CARREAL_SYSTEM_INSTRUCTION,
-    input,
-    ...(thinkingLevel ? { generation_config: { thinking_level: thinkingLevel } } : {}),
-    response_format: {
-      type: "text",
-      mime_type: "application/json",
-      schema: opts.schema,
+  const interaction = await ai.interactions.create(
+    {
+      model,
+      system_instruction: opts.systemInstruction ?? CARREAL_SYSTEM_INSTRUCTION,
+      input,
+      generation_config: {
+        ...(thinkingLevel ? { thinking_level: thinkingLevel } : {}),
+        max_output_tokens: 12_000,
+      },
+      response_format: {
+        type: "text",
+        mime_type: "application/json",
+        schema: opts.schema,
+      },
+      store: false,
     },
-    store: false,
-  });
+    opts.signal ? { signal: opts.signal } : undefined,
+  );
 
   const text = interaction.output_text?.trim();
   if (!text) {
     throw new Error("Gemini n'a renvoyé aucun contenu. Réessayez dans quelques secondes.");
   }
-  return JSON.parse(text) as T;
+  return parseJsonClean<T>(text);
 }
 
-/**
- * Exécute Gemini Interactions API en vrai streaming SSE (stream: true) avec sortie JSON structurée.
- * Permet d'afficher la progression et l'aperçu de l'article en direct dès les premières millisecondes.
- */
-export async function streamStructuredGemini<T>(opts: {
-  prompt: string;
-  imageUrls?: string[];
-  schema: Record<string, unknown>;
-  systemInstruction?: string;
-  model?: string;
+function parseJsonClean<T>(raw: string): T {
+  let cleaned = raw.trim();
+  if (cleaned.startsWith("```")) {
+    cleaned = cleaned.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+  }
+  return JSON.parse(cleaned) as T;
+}
+
+class RetryableStreamError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RetryableStreamError";
+  }
+}
+
+async function runSingleStreamAttempt<T>(opts: {
+  ai: GoogleGenAI;
+  model: string;
+  systemInstruction: string;
+  input: Awaited<ReturnType<typeof buildInput>>;
   thinkingLevel?: GeminiThinkingLevel;
+  schema: Record<string, unknown>;
   signal?: AbortSignal;
   onDelta?: (deltaText: string, accumulated: string) => void;
-}): Promise<{ data: T; raw: string; durationMs: number; model: string }> {
-  const ai = getGeminiClient();
-  const model = opts.model || DEFAULT_GEMINI_MODEL;
-  const thinkingLevel = resolveThinkingLevel(model, opts.thinkingLevel ?? "low");
-  const input = await buildInput(opts.prompt, opts.imageUrls);
-  const startedAt = Date.now();
-
-  const stream = await ai.interactions.create(
+}): Promise<{ data: T; raw: string }> {
+  const stream = await opts.ai.interactions.create(
     {
-      model,
-      system_instruction: opts.systemInstruction ?? CARREAL_SYSTEM_INSTRUCTION,
-      input,
-      ...(thinkingLevel ? { generation_config: { thinking_level: thinkingLevel } } : {}),
+      model: opts.model,
+      system_instruction: opts.systemInstruction,
+      input: opts.input,
+      generation_config: {
+        ...(opts.thinkingLevel ? { thinking_level: opts.thinkingLevel } : {}),
+        max_output_tokens: 12_000,
+      },
       response_format: {
         type: "text",
         mime_type: "application/json",
@@ -168,6 +183,10 @@ export async function streamStructuredGemini<T>(opts: {
   );
 
   let accumulated = "";
+  let completed = false;
+  let completedStatus = "";
+  let streamErrMessage: string | null = null;
+
   for await (const event of stream) {
     if (opts.signal?.aborted) {
       throw new Error("Génération annulée.");
@@ -175,17 +194,113 @@ export async function streamStructuredGemini<T>(opts: {
     if (event.event_type === "step.delta" && event.delta?.type === "text" && event.delta.text) {
       accumulated += event.delta.text;
       opts.onDelta?.(event.delta.text, accumulated);
+    } else if (event.event_type === "interaction.completed") {
+      completed = true;
+      completedStatus = event.interaction?.status ?? "completed";
+    } else if (event.event_type === "error") {
+      const errObj = (event as { error?: { message?: string; code?: string } }).error;
+      streamErrMessage = errObj?.message || errObj?.code || "Interruption temporaire du flux Gemini.";
     }
+  }
+
+  if (streamErrMessage) {
+    throw new RetryableStreamError(streamErrMessage);
+  }
+  if (!completed || (completedStatus && completedStatus !== "completed")) {
+    throw new RetryableStreamError(`Flux interrompu avant la fin (${completedStatus || "incomplet"}).`);
   }
 
   const trimmed = accumulated.trim();
   if (!trimmed) {
-    throw new Error("Gemini n'a renvoyé aucun contenu. Réessayez dans quelques secondes.");
+    throw new RetryableStreamError("Flux vide renvoyé par Gemini.");
   }
-  return {
-    data: JSON.parse(trimmed) as T,
-    raw: trimmed,
-    durationMs: Date.now() - startedAt,
-    model,
-  };
+
+  try {
+    return { data: parseJsonClean<T>(trimmed), raw: trimmed };
+  } catch (e) {
+    throw new RetryableStreamError(e instanceof Error ? e.message : "JSON tronqué dans le flux.");
+  }
+}
+
+/**
+ * Exécute Gemini Interactions API en vrai streaming SSE (stream: true) avec sortie JSON structurée,
+ * détection explicite des coupures mid-stream (event_type === "error" / JSON incomplet),
+ * reprise automatique (2 essais en streaming) et filet de sécurité non-streamé (3e essai).
+ */
+export async function streamStructuredGemini<T>(opts: {
+  prompt: string;
+  imageUrls?: string[];
+  schema: Record<string, unknown>;
+  systemInstruction?: string;
+  model?: string;
+  thinkingLevel?: GeminiThinkingLevel;
+  signal?: AbortSignal;
+  onDelta?: (deltaText: string, accumulated: string) => void;
+  onRetry?: (attempt: number, reason: string) => void;
+}): Promise<{ data: T; raw: string; durationMs: number; model: string }> {
+  const ai = getGeminiClient();
+  const model = opts.model || DEFAULT_GEMINI_MODEL;
+  const thinkingLevel = resolveThinkingLevel(model, opts.thinkingLevel ?? "low");
+  const systemInstruction = opts.systemInstruction ?? CARREAL_SYSTEM_INSTRUCTION;
+  const input = await buildInput(opts.prompt, opts.imageUrls);
+  const startedAt = Date.now();
+
+  let lastError: unknown = null;
+
+  // 2 essais en streaming temps réel (gère les coupures réseau/SSE ponctuelles côté API)
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    if (opts.signal?.aborted) throw new Error("Génération annulée.");
+    try {
+      const { data, raw } = await runSingleStreamAttempt<T>({
+        ai,
+        model,
+        systemInstruction,
+        input,
+        thinkingLevel,
+        schema: opts.schema,
+        signal: opts.signal,
+        onDelta: opts.onDelta,
+      });
+      return { data, raw, durationMs: Date.now() - startedAt, model };
+    } catch (err) {
+      if (opts.signal?.aborted) throw new Error("Génération annulée.");
+      lastError = err;
+      if (!(err instanceof RetryableStreamError)) {
+        throw err;
+      }
+      console.warn(`[gemini] tentative stream #${attempt} interrompue : ${err.message}`);
+      opts.onRetry?.(attempt + 1, err.message);
+      await new Promise((r) => setTimeout(r, attempt * 350));
+    }
+  }
+
+  // 3e essai de secours en mode non-streamé (évite toute coupure SSE mid-stream)
+  if (opts.signal?.aborted) throw new Error("Génération annulée.");
+  try {
+    const interaction = await ai.interactions.create(
+      {
+        model,
+        system_instruction: systemInstruction,
+        input,
+        generation_config: {
+          ...(thinkingLevel ? { thinking_level: thinkingLevel } : {}),
+          max_output_tokens: 12_000,
+        },
+        response_format: {
+          type: "text",
+          mime_type: "application/json",
+          schema: opts.schema,
+        },
+        store: false,
+      },
+      opts.signal ? { signal: opts.signal } : undefined,
+    );
+    const text = interaction.output_text?.trim();
+    if (!text) throw new Error("Gemini n'a renvoyé aucun contenu.");
+    const data = parseJsonClean<T>(text);
+    return { data, raw: text, durationMs: Date.now() - startedAt, model };
+  } catch (fallbackErr) {
+    const cause = fallbackErr instanceof Error ? fallbackErr.message : String(lastError ?? "Erreur Gemini");
+    throw new Error(`La génération a été interrompue côté Gemini (${cause}). Réessayez dans un instant.`);
+  }
 }

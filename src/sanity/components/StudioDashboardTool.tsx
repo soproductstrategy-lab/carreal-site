@@ -162,7 +162,7 @@ export function StudioDashboardTool() {
       })
       .catch(() => {});
 
-    fetch("/api/studio-ai")
+    fetch("/api/studio-ai/")
       .then((r) => r.json())
       .then((d: { configured?: boolean; model?: string; streaming?: boolean }) => {
         if (active) setAiStatus({ configured: Boolean(d.configured), model: d.model, streaming: Boolean(d.streaming) });
@@ -226,7 +226,7 @@ export function StudioDashboardTool() {
     setRefreshing(true);
     setRefreshMsg(null);
     try {
-      await fetch("/api/studio-revalidate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
+      await fetch("/api/studio-revalidate/", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
       setRefreshMsg("Toutes les pages du site public ont été actualisées.");
     } catch {
       setRefreshMsg("Impossible d'actualiser le cache.");

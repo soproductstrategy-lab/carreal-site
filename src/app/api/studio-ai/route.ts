@@ -990,6 +990,23 @@ export async function POST(req: NextRequest) {
             imageUrls: plan.imageUrls,
             thinkingLevel: plan.thinkingLevel,
             signal: req.signal,
+            onRetry: (nextAttempt) => {
+              lastEmit = 0;
+              lastStage = "";
+              lastHeadings = 0;
+              lastFaq = 0;
+              lastIdeas = 0;
+              controller.enqueue(
+                sse("status", {
+                  stage:
+                    nextAttempt === 2
+                      ? "Reprise automatique du flux Gemini…"
+                      : "Finalisation sécurisée en cours…",
+                  elapsedMs: Date.now() - startedAt,
+                  model: DEFAULT_GEMINI_MODEL,
+                }),
+              );
+            },
             onDelta: (_delta, accumulated) => {
               const now = Date.now();
               const live = extractLivePreviewFromPartialJson(accumulated, payload.action);

@@ -37,7 +37,7 @@ export const SitePreviewPane: UserViewComponent = ({ document, schemaType }) => 
   async function refreshSite() {
     setRefreshing(true);
     try {
-      await fetch("/api/studio-revalidate", {
+      await fetch("/api/studio-revalidate/", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ docType: schemaType.name, path }),
