@@ -244,7 +244,12 @@ export async function generateHarnessedImage(opts: {
       const rawText = await res.text();
       let parsed: Record<string, unknown> = {};
       try {
-        parsed = JSON.parse(rawText) as Record<string, unknown>;
+        const json = JSON.parse(rawText) as unknown;
+        if (Array.isArray(json) && json[0] && typeof json[0] === "object") {
+          parsed = json[0] as Record<string, unknown>;
+        } else if (json && typeof json === "object") {
+          parsed = json as Record<string, unknown>;
+        }
       } catch {
         // non-JSON body
       }
@@ -252,6 +257,17 @@ export async function generateHarnessedImage(opts: {
       if (!res.ok) {
         const apiMessage =
           String((parsed.error as { message?: string } | undefined)?.message ?? parsed.message ?? rawText.slice(0, 300)).trim();
+
+        if (res.status === 402 || /prepayment credits are depleted/i.test(apiMessage)) {
+          throw new ImageGenerationError(
+            `Votre clé API est bien passée en mode facturation, mais le solde prépayé AI Studio est actuellement à 0 \$ (« prepayment credits are depleted »). Ouvrez ai.studio/projects pour ajouter le dépôt minimal (5 \$) ou activer vos crédits prépayés sur ce projet.`,
+            {
+              code: "IMAGE_BILLING_REQUIRED",
+              status: 402,
+              helpUrl: "https://ai.studio/projects",
+            },
+          );
+        }
 
         if (res.status === 429) {
           const isZeroFreeTier = /limit:\s*0|free tier/i.test(apiMessage);
